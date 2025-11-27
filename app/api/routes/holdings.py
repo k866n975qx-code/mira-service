@@ -15,7 +15,10 @@ from app.services.dividends import (
     summarize_dividends,
     estimate_forward_dividends_for_holdings,
 )
+from fastapi import Request
+import httpx
 
+from app.models.holding_snapshot import HoldingSnapshot
 
 router = APIRouter(prefix="/lm/holdings", tags=["holdings"])
 
@@ -372,4 +375,46 @@ def get_dividends_for_plaid_account(
         "as_of": as_of.isoformat(),
         "realized": realized,
         "forward": forward,
+    }
+@router.post("/lm/holdings/{plaid_account_id}/snapshot/save")
+def save_holdings_snapshot(
+    plaid_account_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Build the full holdings snapshot by calling the existing snapshot endpoint,
+    then persist that JSON into holding_snapshots.
+
+    This is meant to be called by cron once per day.
+    """
+    # Call our own valued snapshot endpoint
+    base_url = str(request.base_url).rstrip("/")
+    snapshot_url = f"{base_url}/lm/holdings/{plaid_account_id}/snapshot"
+
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.get(snapshot_url)
+        resp.raise_for_status()
+        snapshot = resp.json()
+
+    as_of_str = snapshot.get("as_of")
+    if as_of_str:
+        as_of = date.fromisoformat(as_of_str)
+    else:
+        as_of = date.today()
+
+    row = HoldingSnapshot(
+        plaid_account_id=plaid_account_id,
+        as_of_date=as_of,
+        snapshot=snapshot,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+
+    return {
+        "status": "ok",
+        "snapshot_id": row.id,
+        "plaid_account_id": plaid_account_id,
+        "as_of": as_of_str or as_of.isoformat(),
     }
