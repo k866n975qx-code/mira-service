@@ -13,7 +13,7 @@ router = APIRouter(prefix="/lm/raw", tags=["lunchmoney-raw"])
 
 
 def get_client() -> LunchMoneyClient:
-    return LunchMoneyClient(api_key=settings.lunchmoney_api_key)
+    return LunchMoneyClient()
 
 
 @router.get("/plaid_accounts")

@@ -8,70 +8,67 @@ from app.infra.settings import settings
 
 
 class LunchMoneyClient:
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        timeout: float = 15.0,
-    ) -> None:
-        # Use env settings by default
-        self.api_key = api_key or settings.lunchmoney_api_key
-        # Strip trailing slash so we don't get // in the final URL
-        self.base_url = (base_url or settings.lunchmoney_base_url).rstrip("/")
+    def __init__(self) -> None:
+        self.base_url = settings.lunchmoney_base_url.rstrip("/")
+        self.token = settings.lunchmoney_api_key
 
-        if not self.api_key:
-            raise RuntimeError("LUNCHMONEY_API_KEY not configured")
+        if not self.token:
+            raise RuntimeError("LUNCHMONEY_API_KEY is not set")
 
-        # httpx client with base_url; paths will be relative
-        self._client = httpx.Client(
-            base_url=self.base_url,
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            timeout=timeout,
-        )
+        self._client = httpx.Client(timeout=30.0)
 
-    # ---------- low-level helper ----------
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.token}",
+            "Accept": "application/json",
+        }
 
     def _get(
         self,
         path: str,
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        Simple GET wrapper. `path` can be '/foo' or 'foo'.
-        """
-        resp = self._client.get(path.lstrip("/"), params=params or {})
+        url = f"{self.base_url}{path}"
+        resp = self._client.get(url, headers=self._headers(), params=params or {})
         resp.raise_for_status()
         return resp.json()
 
-    # ---------- public API methods ----------
+    # ---------- existing methods ----------
 
     def get_assets(self) -> List[Dict[str, Any]]:
-        """Return Lunch Money 'assets' (accounts)."""
         data = self._get("/assets")
-        # LM usually wraps as {"assets": [...]}
-        return data.get("assets", data)
+        # /assets returns {"assets": [...]}
+        return data.get("assets", [])
 
     def get_plaid_accounts(self) -> List[Dict[str, Any]]:
-        """
-        Return Plaid-linked accounts.
-
-        Endpoint: GET /plaid_accounts
-        Docs: https://github.com/lunch-money/developers
-        """
         data = self._get("/plaid_accounts")
-        # Typically {"plaid_accounts": [...]}
+        # /plaid_accounts returns a raw list
+        if isinstance(data, list):
+            return data
         return data.get("plaid_accounts", data)
+
+    # ---------- NEW: transactions ----------
 
     def get_transactions(
         self,
-        params: Optional[Dict[str, Any]] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        plaid_account_id: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Return transactions.
+        Wrapper for GET /transactions.
 
-        You can pass filters in `params` later (start_date, end_date, etc.).
-        Endpoint: GET /transactions
+        Docs: https://github.com/lunch-money/developers
         """
-        data = self._get("/transactions", params=params or {})
-        # Typically {"transactions": [...]}
-        return data.get("transactions", data)
+        params: Dict[str, Any] = {}
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        if plaid_account_id:
+            params["plaid_account_id"] = plaid_account_id
+
+        data = self._get("/transactions", params=params)
+
+        # /transactions returns {"transactions": [...], ...}
+        return data.get("transactions", [])

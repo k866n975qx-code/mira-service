@@ -10,12 +10,15 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    String,
+    UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from .db import Base 
-
+   
 # ---------- Lunch Money core ----------
 
 
@@ -74,6 +77,8 @@ class LMTransaction(Base):
     __tablename__ = "lm_transactions"
 
     id = Column(BigInteger, primary_key=True)  # LM transaction id
+    # Lunch Money transaction id (external id from LM API)
+    lm_tx_id = Column(BigInteger, unique=True, index=True, nullable=False)
     date = Column(Date, nullable=False)
     payee = Column(Text, nullable=True)
     amount = Column(Numeric, nullable=False)   # convention: negative = spend, positive = income
@@ -85,6 +90,8 @@ class LMTransaction(Base):
     category_id = Column(
         BigInteger, ForeignKey("lm_categories.id"), nullable=True
     )
+    # Optional: Plaid-linked account id from Lunch Money (e.g. 317631 for M1 Div)
+    plaid_account_id = Column(BigInteger, nullable=True, index=True)
 
     is_pending = Column(Boolean, nullable=False, default=False)
     is_income = Column(Boolean, nullable=False, default=False)
@@ -207,3 +214,102 @@ class SnapshotPosition(Base):
     category = Column(Text, nullable=False)  # "covered_call_etf", "core_etf", etc.
 
     snapshot = relationship("Snapshot", back_populates="positions")
+
+class HoldingSnapshot(Base):
+    """
+    Daily (or ad-hoc) snapshot of a single Plaid-backed investment account.
+    We store the same structure returned by /lm/holdings/{plaid_id}/snapshot
+    in `snapshot` as JSONB so we can time-travel portfolio state.
+    """
+    __tablename__ = "holding_snapshots"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    plaid_account_id = Column(BigInteger, nullable=False, index=True)
+    as_of_date = Column(Date, nullable=False, index=True)
+    snapshot = Column(JSONB, nullable=False)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        # optional, but nice: one snapshot per account per date
+        UniqueConstraint(
+            "plaid_account_id",
+            "as_of_date",
+            name="uq_holding_snapshots_plaid_date",
+        ),
+    )
+
+
+class DividendEvent(Base):
+    """
+    Realized dividend ledger derived from LMTransaction (Plaid) rows.
+    Lets us query dividends by symbol / date range without re-parsing
+    the raw transaction payload every time.
+    """
+    __tablename__ = "dividend_events"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    plaid_account_id = Column(BigInteger, nullable=False, index=True)
+
+    # Optional FK back to the transaction row that produced this event
+    lm_transaction_id = Column(
+        BigInteger,
+        ForeignKey("lm_transactions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    symbol = Column(String(32), nullable=True, index=True)
+
+    pay_date = Column(Date, nullable=False, index=True)
+    amount = Column(Numeric(18, 4), nullable=False)
+    currency = Column(String(8), nullable=False, default="USD")
+
+    source = Column(String(32), nullable=False, default="lunchmoney")
+
+    raw = Column(JSONB, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+
+class PriceQuote(Base):
+    """
+    Simple price cache for yfinance (or other sources).
+    Keyed by (symbol, as_of_date, source).
+    """
+    __tablename__ = "price_quotes"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    symbol = Column(String(32), nullable=False, index=True)
+    as_of_date = Column(Date, nullable=False, index=True)
+    source = Column(String(32), nullable=False, default="yfinance")
+
+    last_price = Column(Numeric(18, 6), nullable=True)
+    currency = Column(String(8), nullable=False, default="USD")
+
+    raw = Column(JSONB, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol",
+            "as_of_date",
+            "source",
+            name="uq_price_quotes_symbol_date_source",
+        ),
+    )
