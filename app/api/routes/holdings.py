@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+
 from app.services.lm_client import LunchMoneyClient
 from app.api.deps import get_db
 from app.infra.models import LMTransaction, LMAccount, HoldingSnapshot
@@ -18,7 +19,6 @@ from app.services.dividends import (
 from fastapi import Request
 import httpx
 
-from app.models.holding_snapshot import HoldingSnapshot
 
 router = APIRouter(prefix="/lm/holdings", tags=["holdings"])
 

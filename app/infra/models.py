@@ -48,7 +48,7 @@ class LMAccount(Base):
     )
 
     transactions = relationship("LMTransaction", back_populates="account")
-
+    bills = relationship("Bill", back_populates="account")
 
 class LMCategory(Base):
     __tablename__ = "lm_categories"
@@ -313,3 +313,192 @@ class PriceQuote(Base):
             name="uq_price_quotes_symbol_date_source",
         ),
     )
+
+# ---------- Recurring bills & reserves ----------
+
+
+class Bill(Base):
+    """
+    User-defined recurring bills / obligations.
+
+    This is intentionally simple: enum-like fields are stored as strings.
+    Frequency is expected to be one of: "monthly" | "yearly" | "weekly".
+    """
+    __tablename__ = "bills"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    name = Column(Text, nullable=False)
+    category = Column(Text, nullable=True)
+
+    amount = Column(Numeric(18, 2), nullable=False)
+
+    # "monthly" | "yearly" | "weekly"
+    frequency = Column(String(16), nullable=False, default="monthly")
+
+    # For monthly bills this is the calendar day (1–31).
+    # For weekly/yearly we can interpret this at the service layer.
+    due_day = Column(Integer, nullable=True)
+
+    auto_pay = Column(Boolean, nullable=False, default=False)
+
+    # Stored as a percentage 0–100; actual color logic is in the service layer.
+    funded_pct = Column(Numeric(5, 2), nullable=False, default=0)
+
+    linked_account_id = Column(
+        BigInteger,
+        ForeignKey("lm_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    next_due_date = Column(Date, nullable=True, index=True)
+
+    notes = Column(Text, nullable=True)
+
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+    account = relationship("LMAccount", back_populates="bills")
+
+
+class ReserveSnapshot(Base):
+    """
+    Snapshot of liquidity / reserves at a point in time.
+
+    Mirrors your v1.5 blueprint:
+
+      - bills_buffer
+      - emergency_target
+      - margin_safety_net
+      - total_recommended
+      - actual_liquidity
+      - coverage_pct
+      - status: "green" | "yellow" | "red"
+    """
+    __tablename__ = "reserve_snapshots"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    as_of = Column(Date, nullable=False, index=True)
+
+    bills_buffer = Column(Numeric(18, 2), nullable=False, default=0)
+    emergency_target = Column(Numeric(18, 2), nullable=False, default=0)
+    margin_safety_net = Column(Numeric(18, 2), nullable=False, default=0)
+
+    total_recommended = Column(Numeric(18, 2), nullable=False, default=0)
+    actual_liquidity = Column(Numeric(18, 2), nullable=False, default=0)
+
+    # 0–100 coverage percentage
+    coverage_pct = Column(Numeric(5, 2), nullable=False, default=0)
+
+    # "green" | "yellow" | "red"
+    status = Column(String(16), nullable=False, default="red")
+
+    # Optional: store inputs/details used to compute this snapshot
+    details = Column("metadata", JSONB, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+# ---------- Budgeting ----------
+
+
+class BudgetCategory(Base):
+    """
+    High-level spending buckets (e.g. Food, Misc, Gas, Fun).
+    """
+    __tablename__ = "budget_categories"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    name = Column(Text, nullable=False, unique=True)  # e.g. "Food"
+    description = Column(Text, nullable=True)
+
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+    # relationships (optional for now, but handy later)
+    targets = relationship("BudgetTarget", back_populates="category")
+    transaction_links = relationship(
+        "TransactionBudget", back_populates="category"
+    )
+
+
+class BudgetTarget(Base):
+    """
+    Target spend for a budget category, e.g. Food = 600/month.
+    """
+    __tablename__ = "budget_targets"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    budget_category_id = Column(
+        BigInteger,
+        ForeignKey("budget_categories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # "monthly" for now; leaving room for future periods
+    period = Column(String(32), nullable=False, default="monthly")
+
+    target_amount = Column(Numeric(18, 2), nullable=False)
+
+    effective_from = Column(Date, nullable=True)
+    effective_to = Column(Date, nullable=True)
+
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+    category = relationship("BudgetCategory", back_populates="targets")
+
+
+class TransactionBudget(Base):
+    """
+    Optional link from an LMTransaction to a BudgetCategory.
+    Lets us map spending into high-level buckets.
+    """
+    __tablename__ = "transaction_budgets"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    lm_transaction_id = Column(
+        BigInteger,
+        ForeignKey("lm_transactions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    budget_category_id = Column(
+        BigInteger,
+        ForeignKey("budget_categories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+    category = relationship("BudgetCategory", back_populates="transaction_links")   
