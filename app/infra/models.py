@@ -314,6 +314,38 @@ class PriceQuote(Base):
         ),
     )
 
+
+# ---------- Security mappings (CUSIP → ticker) ----------
+
+
+class SecurityMapping(Base):
+    """
+    Simple CUSIP → ticker mapping table so Mira can remember tickers
+    associated with dividend and holding data.
+    """
+    __tablename__ = "security_mappings"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    # External identifier from the security/dividend payloads, e.g. "82889N863"
+    cusip = Column(String(32), nullable=False, unique=True, index=True)
+
+    # Ticker symbol Mira should use when presenting this security, e.g. "QYLD"
+    ticker = Column(String(32), nullable=False, index=True)
+
+    # Optional metadata to make reports nicer
+    name = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
 # ---------- Recurring bills & reserves ----------
 
 
