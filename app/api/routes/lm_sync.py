@@ -21,8 +21,15 @@ from app.services.dividends import sync_dividend_events_from_transactions
 router = APIRouter(prefix="/lm/sync", tags=["lunchmoney"])
 
 
+
 class LmTransactionsSyncRequest(BaseModel):
     plaid_account_id: int
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
+
+# New model for syncing all transactions (across all accounts)
+class LmTransactionsSyncAllRequest(BaseModel):
     start_date: Optional[date] = None
     end_date: Optional[date] = None
 
@@ -204,6 +211,115 @@ def sync_lm_transactions(
         "created": created,
         "skipped": skipped,
         "count": len(txs),
+    }
+
+
+# Sync all Lunch Money transactions across all accounts for a date range
+@router.post("/transactions/all")
+def sync_all_lm_transactions(
+    payload: LmTransactionsSyncAllRequest,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """
+    Pull ALL transactions from Lunch Money (across all accounts) for a date range
+    and store them in Mira DB.
+
+    - No plaid_account_id filter is used, so this includes:
+      • all Plaid-linked accounts (checking, savings, credit, investment)
+      • any non-Plaid accounts managed in Lunch Money
+    """
+    client = get_client()
+
+    end_date = payload.end_date or date.today()
+    start_date = payload.start_date or (end_date - timedelta(days=30))
+
+    try:
+        txs: List[Dict[str, Any]] = client.get_transactions(
+            start_date=start_date.isoformat(),
+            end_date=end_date.isoformat(),
+            plaid_account_id=None,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    created = 0
+    skipped = 0
+
+    for tx in txs:
+        lm_tx_id = tx.get("id")
+        if lm_tx_id is None:
+            skipped += 1
+            continue
+
+        existing = (
+            db.query(LMTransaction)
+            .filter(LMTransaction.id == lm_tx_id)
+            .one_or_none()
+        )
+
+        if existing:
+            skipped += 1
+            continue
+
+        amount_raw = tx.get("to_base") or tx.get("amount")
+        try:
+            amount = float(amount_raw) if amount_raw is not None else 0.0
+        except (TypeError, ValueError):
+            amount = 0.0
+
+        obj = LMTransaction(
+            id=lm_tx_id,
+            lm_tx_id=lm_tx_id,
+            plaid_account_id=tx.get("plaid_account_id"),
+            date=tx.get("date"),
+            amount=amount,
+            payee=tx.get("payee"),
+            raw=tx,
+        )
+        db.add(obj)
+        created += 1
+
+    db.commit()
+
+    # Collect unique plaid account IDs present in this batch for dividend sync
+    plaid_ids: set[int] = set()
+    for tx in txs:
+        pid = tx.get("plaid_account_id")
+        if pid is not None:
+            try:
+                plaid_ids.add(int(pid))
+            except (TypeError, ValueError):
+                continue
+
+    # For each plaid account, sync dividend events over the same date window
+    for pid in sorted(plaid_ids):
+        tx_rows: List[LMTransaction] = (
+            db.query(LMTransaction)
+            .filter(LMTransaction.plaid_account_id == pid)
+            .filter(LMTransaction.date >= start_date.isoformat())
+            .filter(LMTransaction.date <= end_date.isoformat())
+            .all()
+        )
+
+        if not tx_rows:
+            continue
+
+        sync_dividend_events_from_transactions(
+            db=db,
+            plaid_account_id=pid,
+            transactions=tx_rows,
+        )
+        db.commit()
+
+    return {
+        "source": "lunchmoney",
+        "mode": "all_accounts",
+        "plaid_account_ids": sorted(plaid_ids),
+        "created": created,
+        "skipped": skipped,
+        "count": len(txs),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
     }
 
 # --- Holdings reconstruction (v0) --- #
