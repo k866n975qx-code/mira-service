@@ -1,0 +1,869 @@
+openapi: 3.1.0
+info:
+  title: Mira Finance API
+  version: "1.6.0"
+  description: |
+    Mira is Jose's personal finance backend.
+
+    It exposes:
+    - Holdings snapshot for the M1 brokerage
+    - Liquidity, reserves, and runway status
+    - Cashflow and paycheck allocation advice
+    - Budget categories, targets, and transaction mapping
+
+servers:
+  - url: https://mira.joseai.dev
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Health check
+      description: Simple health check for Mira service.
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  detail:
+                    type: string
+
+  /lm/holdings/{plaid_account_id}/snapshot:
+    get:
+      operationId: getHoldingsSnapshot
+      summary: Get holdings snapshot for a Lunch Money Plaid account
+      description: >
+        Returns the latest reconstructed holdings snapshot for the given
+        Lunch Money Plaid investment account. Includes current prices,
+        market values, unrealized PnL, forward 12m income, realized
+        dividends month-to-date, and margin loan info.
+      parameters:
+        - name: plaid_account_id
+          in: path
+          required: true
+          schema:
+            type: integer
+          description: >
+            Plaid account ID from Lunch Money.
+            For Jose's M1 brokerage, ALWAYS use 317631 unless the user explicitly says otherwise.
+        - name: as_of
+          in: query
+          required: false
+          description: >
+            Optional YYYY-MM-DD date to reconstruct holdings as of that date.
+            If omitted, the API uses "today" in the server's timezone.
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Successful snapshot response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    format: date
+                  plaid_account_id:
+                    type: integer
+                  count:
+                    type: integer
+                  holdings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        symbol:
+                          type: string
+                        shares:
+                          type: number
+                        cost_basis:
+                          type: number
+                        avg_cost:
+                          type: number
+                        trades:
+                          type: integer
+                        last_price:
+                          type: number
+                        market_value:
+                          type: number
+                        unrealized_pnl:
+                          type: number
+                        unrealized_pct:
+                          type: number
+                        weight_pct:
+                          type: number
+                        forward_12m_dividend:
+                          type: number
+                        current_yield_pct:
+                          type: number
+                        yield_on_cost_pct:
+                          type: number
+                  total_market_value:
+                    type: number
+                  prices_as_of:
+                    type: string
+                    format: date
+                  missing_prices:
+                    type: array
+                    items:
+                      type: string
+                  margin_loan_balance:
+                    type: number
+                    nullable: true
+                  margin_to_portfolio_pct:
+                    type: number
+                    nullable: true
+                  totals:
+                    type: object
+                    properties:
+                      cost_basis:
+                        type: number
+                      market_value:
+                        type: number
+                      unrealized_pnl:
+                        type: number
+                      unrealized_pct:
+                        type: number
+                      margin_loan_balance:
+                        type: number
+                      margin_to_portfolio_pct:
+                        type: number
+                  income:
+                    type: object
+                    properties:
+                      forward_12m_total:
+                        type: number
+                      projected_monthly_income:
+                        type: number
+                      portfolio_current_yield_pct:
+                        type: number
+                      portfolio_yield_on_cost_pct:
+                        type: number
+                  dividends:
+                    type: object
+                    properties:
+                      realized_mtd:
+                        type: object
+                        properties:
+                          start:
+                            type: string
+                            format: date
+                          end:
+                            type: string
+                            format: date
+                          total_dividends:
+                            type: number
+                          by_date:
+                            type: object
+                            additionalProperties:
+                              type: number
+                          by_month:
+                            type: object
+                            additionalProperties:
+                              type: number
+                          by_symbol:
+                            type: object
+                            additionalProperties:
+                              type: number
+                          events_count:
+                            type: integer
+                      projected_vs_received:
+                        type: object
+                        properties:
+                          window:
+                            type: object
+                            properties:
+                              label:
+                                type: string
+                              start:
+                                type: string
+                                format: date
+                              end:
+                                type: string
+                                format: date
+                          projected:
+                            type: number
+                          received:
+                            type: number
+                          difference:
+                            type: number
+                          pct_of_projection:
+                            type: number
+        "404":
+          description: No transactions or holdings found for the given account.
+        "500":
+          description: Unexpected server error.
+
+  /lm/liquidity/summary:
+    get:
+      operationId: getLiquiditySummary
+      summary: Get unified liquidity summary
+      description: >
+        Returns a unified liquidity snapshot, including accounts, cashflow,
+        reserves, and bill funding overview for Jose.
+      responses:
+        "200":
+          description: Liquidity summary returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    format: date
+                  accounts:
+                    type: object
+                  cashflow:
+                    type: object
+                  reserves:
+                    type: object
+                  bills_funding:
+                    type: object
+
+  /lm/liquidity/insights:
+    get:
+      operationId: getLiquidityInsights
+      summary: Get high-level liquidity and allocation insights
+      description: >
+        Returns high-level insights about Jose's cashflow, reserves,
+        bill funding, and suggested monthly allocations to emergency fund,
+        sinking funds, and investments.
+      responses:
+        "200":
+          description: Liquidity insights returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    format: date
+                  cashflow:
+                    type: object
+                  reserves:
+                    type: object
+                  bills:
+                    type: object
+                  allocation_plan:
+                    type: object
+                  messages:
+                    type: array
+                    items:
+                      type: string
+
+  /lm/liquidity/paycheck_plan:
+    get:
+      operationId: getPaycheckPlan
+      summary: Compute paycheck allocation plan
+      description: >
+        Given a paycheck amount and frequency, returns a recommended split
+        into emergency fund, sinking funds (bills/credit), investments,
+        and spending budgets (Food, Misc, etc.).
+      parameters:
+        - name: amount
+          in: query
+          required: true
+          description: Net paycheck amount to allocate.
+          schema:
+            type: number
+        - name: frequency
+          in: query
+          required: false
+          description: >
+            Paycheck frequency. Supported values: weekly, biweekly,
+            semimonthly, monthly. Defaults to biweekly.
+          schema:
+            type: string
+            enum: [weekly, biweekly, semimonthly, monthly]
+      responses:
+        "200":
+          description: Paycheck plan returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    format: date
+                  frequency:
+                    type: string
+                  paycheck_amount:
+                    type: number
+                  base_monthly_allocation:
+                    type: object
+                  per_paycheck_plan:
+                    type: object
+
+  /lm/reserves/snapshot:
+    get:
+      operationId: getReservesSnapshot
+      summary: Get reserves snapshot
+      description: >
+        Computes a reserves snapshot including bills buffer, emergency target,
+        margin safety net, total recommended reserves, actual liquidity,
+        coverage percentage, and status.
+      responses:
+        "200":
+          description: Reserves snapshot returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    format: date
+                  bills_buffer:
+                    type: number
+                  emergency_target:
+                    type: number
+                  margin_safety_net:
+                    type: number
+                  total_recommended:
+                    type: number
+                  actual_liquidity:
+                    type: number
+                  coverage_pct:
+                    type: number
+                  status:
+                    type: string
+                  details:
+                    type: object
+
+  /lm/reserves/runway:
+    get:
+      operationId: getRunway
+      summary: Get next-30-day obligations and runway
+      description: >
+        Returns upcoming bills within the next N days (default 30), total
+        required cash, actual liquidity, shortfall, and estimated runway days.
+      parameters:
+        - name: days_ahead
+          in: query
+          required: false
+          description: Number of days ahead to look for bills. Defaults to 30.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Runway info returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    format: date
+                  days_ahead:
+                    type: integer
+                  bills_next_30:
+                    type: array
+                    items:
+                      type: object
+                  total_required:
+                    type: number
+                  actual_liquidity:
+                    type: number
+                  shortfall:
+                    type: number
+                  runway_days:
+                    type: number
+
+  /lm/budgets/summary:
+    get:
+      operationId: getBudgetsSummary
+      summary: Get budget categories summary
+      description: >
+        Summarizes spending by budget category, including month-to-date
+        spend, average monthly spend, targets, and remaining to target.
+      parameters:
+        - name: days_for_avg
+          in: query
+          required: false
+          description: Number of days to use for average spend window. Defaults to 90.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Budget summary returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    format: date
+                  range:
+                    type: object
+                  total_month_to_date_spend:
+                    type: number
+                  categories:
+                    type: array
+                    items:
+                      type: object
+
+  /lm/budgets/uncategorized:
+    get:
+      operationId: getUncategorizedTransactions
+      summary: Get uncategorized spending transactions
+      description: >
+        Returns spending transactions (amount < 0) in the last N days that
+        do not have a budget category assigned.
+      parameters:
+        - name: days
+          in: query
+          required: false
+          description: Number of days to look back. Defaults to 60.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Uncategorized transactions returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    format: date
+                  range:
+                    type: object
+                  count:
+                    type: integer
+                  transactions:
+                    type: array
+                    items:
+                      type: object
+
+  /lm/budgets/categories:
+    get:
+      operationId: listBudgetCategories
+      summary: List budget categories
+      description: Returns all active budget categories.
+      responses:
+        "200":
+          description: List of categories.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  categories:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        name:
+                          type: string
+                        description:
+                          type: string
+                          nullable: true
+                        is_active:
+                          type: boolean
+    post:
+      operationId: createBudgetCategory
+      summary: Create a budget category
+      description: Creates a new budget category if it does not already exist.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                  nullable: true
+      responses:
+        "200":
+          description: Category created or already existed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  id:
+                    type: integer
+                  name:
+                    type: string
+
+  /lm/budgets/assign:
+    post:
+      operationId: assignTransactionToBudget
+      summary: Assign a transaction to a budget category
+      description: >
+        Assigns or updates a budget category mapping for a given LM transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                transaction_id:
+                  type: integer
+                category_id:
+                  type: integer
+              required:
+                - transaction_id
+                - category_id
+      responses:
+        "200":
+          description: Mapping created or updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  transaction_id:
+                    type: integer
+                  category_id:
+                    type: integer
+                  category_name:
+                    type: string
+
+  /lm/budgets/targets:
+    get:
+      operationId: listBudgetTargets
+      summary: List budget targets
+      description: Returns active monthly budget targets for categories.
+      responses:
+        "200":
+          description: List of targets.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  targets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        category_id:
+                          type: integer
+                        category_name:
+                          type: string
+                        period:
+                          type: string
+                        target_amount:
+                          type: number
+                        effective_from:
+                          type: string
+                          nullable: true
+                        effective_to:
+                          type: string
+                          nullable: true
+                        is_active:
+                          type: boolean
+    post:
+      operationId: upsertBudgetTarget
+      summary: Create or update a budget target
+      description: >
+        Creates or updates a monthly budget target for a category.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                category_id:
+                  type: integer
+                target_amount:
+                  type: number
+                period:
+                  type: string
+                  default: monthly
+              required:
+                - category_id
+                - target_amount
+      responses:
+        "200":
+          description: Target created or updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  id:
+                    type: integer
+                  category_id:
+                    type: integer
+                  category_name:
+                    type: string
+                  period:
+                    type: string
+                  target_amount:
+                    type: number
+
+  /lm/sync/transactions/all:
+    post:
+      operationId: syncAllTransactions
+      summary: Sync all Lunch Money transactions
+      description: >
+        Pulls all transactions from Lunch Money across all accounts for the given
+        date range and writes them into Mira's lm_transactions table. Intended to
+        be run periodically (e.g., via cron) to keep transaction data fresh.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                start_date:
+                  type: string
+                  format: date
+                  description: Optional start date (YYYY-MM-DD). Defaults to last 30 days.
+                end_date:
+                  type: string
+                  format: date
+                  description: Optional end date (YYYY-MM-DD). Defaults to today.
+      responses:
+        "200":
+          description: Sync summary returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  mode:
+                    type: string
+                  plaid_account_ids:
+                    type: array
+                    items:
+                      type: integer
+                  created:
+                    type: integer
+                  skipped:
+                    type: integer
+                  count:
+                    type: integer
+                  start_date:
+                    type: string
+                    format: date
+                  end_date:
+                    type: string
+                    format: date
+
+  /lm/securities/mappings:
+    get:
+      operationId: listSecurityMappings
+      summary: List security CUSIP→ticker mappings
+      description: >
+        Returns all active CUSIP→ticker mappings, or a single mapping if a CUSIP
+        filter is provided.
+      parameters:
+        - name: cusip
+          in: query
+          required: false
+          description: Optional CUSIP filter. If provided, returns only that mapping.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of mappings returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  mappings:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        cusip:
+                          type: string
+                        ticker:
+                          type: string
+                        name:
+                          type: string
+                          nullable: true
+                        notes:
+                          type: string
+                          nullable: true
+                        is_active:
+                          type: boolean
+                        created_at:
+                          type: string
+                          nullable: true
+                        updated_at:
+                          type: string
+                          nullable: true
+    post:
+      operationId: upsertSecurityMapping
+      summary: Create or update a CUSIP→ticker mapping
+      description: >
+        Creates or updates a persistent CUSIP→ticker mapping that Mira can use
+        when interpreting dividend and holdings data.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cusip:
+                  type: string
+                ticker:
+                  type: string
+                name:
+                  type: string
+                  nullable: true
+                notes:
+                  type: string
+                  nullable: true
+              required:
+                - cusip
+                - ticker
+      responses:
+        "200":
+          description: Mapping created or updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  id:
+                    type: integer
+                  cusip:
+                    type: string
+                  ticker:
+                    type: string
+                  name:
+                    type: string
+                    nullable: true
+                  notes:
+                    type: string
+                    nullable: true
+                  is_active:
+                    type: boolean
+
+  /lm/dividends/events:
+    get:
+      operationId: getDividendEvents
+      summary: List realized dividend events
+      description: >
+        Returns realized dividend cash events recorded in Mira's dividend_events
+        table for the specified date range and optional Plaid account filter.
+        Use this when you need to analyze historical dividend income, map CUSIPs
+        to tickers, or build dividend reports.
+      parameters:
+        - name: plaid_account_id
+          in: query
+          required: false
+          description: Optional Plaid account ID filter. If omitted, returns events for all accounts.
+          schema:
+            type: integer
+        - name: start_date
+          in: query
+          required: false
+          description: Optional start date (inclusive, YYYY-MM-DD). Defaults to 30 days before end_date if omitted.
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          required: false
+          description: Optional end date (inclusive, YYYY-MM-DD). Defaults to today if omitted.
+          schema:
+            type: string
+            format: date
+        - name: limit
+          in: query
+          required: false
+          description: Maximum number of events to return. Defaults to 200, max 1000.
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Dividend events returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  as_of:
+                    type: string
+                    description: UTC timestamp when the snapshot was generated.
+                  range:
+                    type: object
+                    properties:
+                      start:
+                        type: string
+                        format: date
+                      end:
+                        type: string
+                        format: date
+                  count:
+                    type: integer
+                  events:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        plaid_account_id:
+                          type: integer
+                        lm_transaction_id:
+                          type: integer
+                          nullable: true
+                        pay_date:
+                          type: string
+                          format: date
+                        amount:
+                          type: number
+                        currency:
+                          type: string
+                        symbol:
+                          type: string
+                          nullable: true
+                        cusip:
+                          type: string
+                          nullable: true
+                        source:
+                          type: string
+
+components:
+  schemas: {}
