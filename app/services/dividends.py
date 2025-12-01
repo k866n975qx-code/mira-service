@@ -393,3 +393,41 @@ def sync_dividend_events_from_transactions(
             persisted.append(existing)
 
     return persisted
+
+
+def backfill_dividend_cusips(
+    db: Session,
+    start: date,
+    end: date,
+) -> int:
+    """Backfill CUSIP values on existing dividend_events between start and end dates."""
+    updated = 0
+
+    q = (
+        db.query(DividendEvent)
+        .filter(DividendEvent.pay_date >= start)
+        .filter(DividendEvent.pay_date <= end)
+    )
+
+    for de in q:
+        if de.cusip is not None:
+            continue
+        if de.lm_transaction_id is None:
+            continue
+
+        tx = db.query(LMTransaction).get(de.lm_transaction_id)
+        if tx is None:
+            continue
+
+        meta = _load_plaid_metadata(tx)
+        cusip = _extract_cusip_from_metadata(meta)
+        if not cusip:
+            continue
+
+        de.cusip = cusip
+        updated += 1
+
+    if updated:
+        db.commit()
+
+    return updated
