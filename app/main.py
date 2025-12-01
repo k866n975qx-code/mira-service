@@ -13,6 +13,7 @@ from app.api.routes.runway import router as runway_router
 from app.api.routes.insights import router as insights_router
 from app.api.routes.budgets import router as budgets_router
 from app.api.routes.securities import router as securities_router
+from app.api.routes.dividends import router as dividends_router
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -34,7 +35,7 @@ def create_app() -> FastAPI:
     app.include_router(insights_router)
     app.include_router(budgets_router)
     app.include_router(securities_router)
-   
+    app.include_router(dividends_router) 
     @app.get("/", tags=["meta"])
     async def root() -> dict:
         return {"service": "mira", "status": "running"}

@@ -266,6 +266,9 @@ class DividendEvent(Base):
 
     symbol = Column(String(32), nullable=True, index=True)
 
+    # Optional security identifier (CUSIP) associated with this dividend, when available.
+    cusip = Column(String(32), nullable=True, index=True)
+
     pay_date = Column(Date, nullable=False, index=True)
     amount = Column(Numeric(18, 4), nullable=False)
     currency = Column(String(8), nullable=False, default="USD")

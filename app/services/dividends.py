@@ -58,6 +58,37 @@ def _load_plaid_metadata(tx: LMTransaction) -> Dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
+def _extract_cusip_from_metadata(meta: Dict[str, Any]) -> Optional[str]:
+    """
+    Attempt to extract a CUSIP from Plaid/Lunch Money metadata.
+    Checks top-level 'cusip' key, then 'security' and 'plaid_security' sub-objects.
+    Returns the CUSIP as uppercase string if found, else None.
+    """
+    if not meta:
+        return None
+
+    # Check top-level 'cusip'
+    cusip = meta.get("cusip")
+    if isinstance(cusip, str) and cusip.strip():
+        return cusip.strip().upper()
+
+    # Check 'security' dict
+    security = meta.get("security")
+    if isinstance(security, dict):
+        cusip = security.get("cusip")
+        if isinstance(cusip, str) and cusip.strip():
+            return cusip.strip().upper()
+
+    # Check 'plaid_security' dict
+    plaid_security = meta.get("plaid_security")
+    if isinstance(plaid_security, dict):
+        cusip = plaid_security.get("cusip")
+        if isinstance(cusip, str) and cusip.strip():
+            return cusip.strip().upper()
+
+    return None
+
+
 def _is_dividend_tx(tx: LMTransaction) -> bool:
     """
     Heuristic to detect dividend transactions from LM + Plaid.
@@ -97,6 +128,7 @@ class DividendCashEvent:
     tx_date: date         # pay date (from Lunch Money)
     amount: float         # cash amount (positive = cash to you)
     symbol: Optional[str] # we may not always know this reliably
+    cusip: Optional[str]  # security identifier (when available) from Plaid/Lunch Money metadata
     raw_payee: str
 
 
@@ -124,6 +156,7 @@ def extract_dividend_events(
             amount = -amount
 
         meta = _load_plaid_metadata(tx)
+        cusip = _extract_cusip_from_metadata(meta)
 
         # We *may* be able to infer a symbol from metadata 'name'
         # like "JEPI dividend ..." but your sample used CUSIPs.
@@ -145,6 +178,7 @@ def extract_dividend_events(
                 tx_date=_tx_date(tx),
                 amount=round(amount, 2),
                 symbol=symbol,
+                cusip=cusip,
                 raw_payee=tx.payee or "",
             )
         )
@@ -340,6 +374,7 @@ def sync_dividend_events_from_transactions(
                 plaid_account_id=plaid_account_id,
                 lm_transaction_id=ev.tx_id,
                 symbol=ev.symbol,
+                cusip=ev.cusip,
                 pay_date=ev.tx_date,
                 amount=ev.amount,
                 currency=currency,
@@ -351,6 +386,7 @@ def sync_dividend_events_from_transactions(
         else:
             existing.plaid_account_id = plaid_account_id
             existing.symbol = ev.symbol
+            existing.cusip = ev.cusip
             existing.pay_date = ev.tx_date
             existing.amount = ev.amount
             existing.currency = currency
