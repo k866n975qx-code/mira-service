@@ -61,30 +61,28 @@ def _load_plaid_metadata(tx: LMTransaction) -> Dict[str, Any]:
 def _extract_cusip_from_metadata(meta: Dict[str, Any]) -> Optional[str]:
     """
     Attempt to extract a CUSIP from Plaid/Lunch Money metadata.
-    Checks top-level 'cusip' key, then 'security' and 'plaid_security' sub-objects.
-    Returns the CUSIP as uppercase string if found, else None.
+    Parses the CUSIP from the 'name' field when it follows the pattern:
+    "Dividend of 78433H303 $7.78 received. - DIVIDEND"
     """
     if not meta:
         return None
 
-    # Check top-level 'cusip'
-    cusip = meta.get("cusip")
-    if isinstance(cusip, str) and cusip.strip():
-        return cusip.strip().upper()
+    name = meta.get("name") or ""
+    if not name:
+        return None
 
-    # Check 'security' dict
-    security = meta.get("security")
-    if isinstance(security, dict):
-        cusip = security.get("cusip")
-        if isinstance(cusip, str) and cusip.strip():
-            return cusip.strip().upper()
+    marker = "Dividend of "
+    if marker not in name:
+        return None
 
-    # Check 'plaid_security' dict
-    plaid_security = meta.get("plaid_security")
-    if isinstance(plaid_security, dict):
-        cusip = plaid_security.get("cusip")
-        if isinstance(cusip, str) and cusip.strip():
-            return cusip.strip().upper()
+    try:
+        after_marker = name.split(marker, 1)[1]
+        token = after_marker.split()[0]
+        token = token.strip(",.$")
+        if token and token.isalnum():
+            return token.upper()
+    except Exception:
+        return None
 
     return None
 
