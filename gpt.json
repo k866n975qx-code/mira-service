@@ -1,0 +1,589 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Mira Service API",
+    "version": "0.3.0",
+    "description": "Mira is Jose's personal finance backend for M1/Lunch Money.\nExposes health, holdings snapshots, dividend events, and LM sync."
+  },
+  "servers": [
+    {
+      "url": "https://mira.joseai.dev"
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Service root",
+        "responses": {
+          "200": {
+            "description": "Basic service metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "service": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Health check",
+        "description": "Pings service and DB connectivity.",
+        "responses": {
+          "200": {
+            "description": "Service is healthy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "service": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string"
+                    },
+                    "db_ok": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lm/holdings/{plaid_account_id}/snapshot": {
+      "get": {
+        "tags": [
+          "holdings"
+        ],
+        "summary": "Get holdings snapshot for a Plaid investment account",
+        "parameters": [
+          {
+            "name": "plaid_account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Plaid account ID (M1 brokerage is 317631 unless otherwise specified)."
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Optional YYYY-MM-DD to reconstruct as-of that date (defaults to today)."
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Bypass caches and recompute snapshot."
+          },
+          {
+            "name": "goal_monthly",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "float"
+            },
+            "description": "Target monthly dividend income (defaults to 2000)."
+          },
+          {
+            "name": "symbols",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated tickers to include (e.g. JEPI,SVOL)."
+          },
+          {
+            "name": "apr_current_pct",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "float"
+            },
+            "description": "Current promo APR (e.g., 4.4)."
+          },
+          {
+            "name": "apr_future_pct",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "float"
+            },
+            "description": "Future APR after promo (e.g., 5.9)."
+          },
+          {
+            "name": "apr_future_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "When the future APR begins (e.g., 2026-11-01)."
+          },
+          {
+            "name": "margin_mode",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Preferred margin guidance mode: conservative|balanced|aggressive."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Holdings snapshot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "as_of": {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    "plaid_account_id": {
+                      "type": "integer"
+                    },
+                    "holdings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "symbol": {
+                            "type": "string"
+                          },
+                          "shares": {
+                            "type": "number"
+                          },
+                          "cost_basis": {
+                            "type": "number"
+                          },
+                          "avg_cost": {
+                            "type": "number"
+                          },
+                          "trades": {
+                            "type": "integer"
+                          },
+                          "last_price": {
+                            "type": "number"
+                          },
+                          "market_value": {
+                            "type": "number"
+                          },
+                          "unrealized_pnl": {
+                            "type": "number"
+                          },
+                          "unrealized_pct": {
+                            "type": "number"
+                          },
+                          "weight_pct": {
+                            "type": "number"
+                          },
+                          "forward_12m_dividend": {
+                            "type": "number"
+                          },
+                          "current_yield_pct": {
+                            "type": "number"
+                          },
+                          "yield_on_cost_pct": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    },
+                    "filters": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "symbols": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "total_market_value": {
+                      "type": "number"
+                    },
+                    "prices_as_of": {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    "missing_prices": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "margin_loan_balance": {
+                      "type": "number",
+                      "nullable": true
+                    },
+                    "margin_to_portfolio_pct": {
+                      "type": "number",
+                      "nullable": true
+                    },
+                    "totals": {
+                      "type": "object",
+                      "properties": {
+                        "cost_basis": {
+                          "type": "number"
+                        },
+                        "market_value": {
+                          "type": "number"
+                        },
+                        "unrealized_pnl": {
+                          "type": "number"
+                        },
+                        "unrealized_pct": {
+                          "type": "number"
+                        },
+                        "margin_loan_balance": {
+                          "type": "number"
+                        },
+                        "margin_to_portfolio_pct": {
+                          "type": "number"
+                        }
+                      }
+                    },
+                    "income": {
+                      "type": "object",
+                      "properties": {
+                        "forward_12m_total": {
+                          "type": "number"
+                        },
+                        "projected_monthly_income": {
+                          "type": "number"
+                        },
+                        "portfolio_current_yield_pct": {
+                          "type": "number"
+                        },
+                        "portfolio_yield_on_cost_pct": {
+                          "type": "number"
+                        }
+                      }
+                    },
+                    "dividends": {
+                      "type": "object",
+                      "properties": {
+                        "realized_mtd": {
+                          "type": "object"
+                        },
+                        "projected_vs_received": {
+                          "type": "object"
+                        },
+                        "windows": {
+                          "type": "object"
+                        }
+                      }
+                    },
+                    "goal_progress": {
+                      "type": "object"
+                    },
+                    "margin_guidance": {
+                      "type": "object"
+                    },
+                    "cached": {
+                      "type": "boolean"
+                    },
+                    "meta": {
+                      "type": "object",
+                      "properties": {
+                        "served_from": {
+                          "type": "string",
+                          "enum": [
+                            "db",
+                            "recomputed"
+                          ]
+                        },
+                        "snapshot_created_at": {
+                          "type": "string"
+                        },
+                        "snapshot_age_days": {
+                          "type": "integer",
+                          "nullable": true
+                        },
+                        "last_transaction_sync_at": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "cache": {
+                          "type": "object",
+                          "properties": {
+                            "yf_dividends": {
+                              "type": "object",
+                              "properties": {
+                                "ttl_seconds": {
+                                  "type": "integer"
+                                },
+                                "bypassed": {
+                                  "type": "boolean"
+                                }
+                              }
+                            },
+                            "pricing": {
+                              "type": "object",
+                              "properties": {
+                                "ttl_seconds": {
+                                  "type": "integer"
+                                },
+                                "bypassed": {
+                                  "type": "boolean"
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found or account not eligible."
+          },
+          "500": {
+            "description": "Unexpected server error."
+          }
+        }
+      }
+    },
+    "/lm/dividends/events": {
+      "get": {
+        "tags": [
+          "dividends"
+        ],
+        "summary": "List realized dividend events",
+        "parameters": [
+          {
+            "name": "plaid_account_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Optional Plaid account ID filter (all accounts if omitted)."
+          },
+          {
+            "name": "start_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Start date (inclusive). Defaults to 30 days before end_date."
+          },
+          {
+            "name": "end_date",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "End date (inclusive). Defaults to today."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 200
+            },
+            "description": "Max events to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dividend events returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "as_of": {
+                      "type": "string"
+                    },
+                    "range": {
+                      "type": "object",
+                      "properties": {
+                        "start": {
+                          "type": "string",
+                          "format": "date"
+                        },
+                        "end": {
+                          "type": "string",
+                          "format": "date"
+                        }
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "integer"
+                          },
+                          "plaid_account_id": {
+                            "type": "integer"
+                          },
+                          "lm_transaction_id": {
+                            "type": "integer",
+                            "nullable": true
+                          },
+                          "pay_date": {
+                            "type": "string",
+                            "format": "date"
+                          },
+                          "amount": {
+                            "type": "number"
+                          },
+                          "currency": {
+                            "type": "string"
+                          },
+                          "symbol": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "cusip": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "source": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lm/sync/transactions/all": {
+      "post": {
+        "tags": [
+          "lunchmoney"
+        ],
+        "summary": "Sync all Lunch Money transactions (M1-only)",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "start_date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Optional start date (defaults to 30 days before end_date or today)."
+                  },
+                  "end_date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Optional end date (defaults to today)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sync summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string"
+                    },
+                    "mode": {
+                      "type": "string"
+                    },
+                    "plaid_account_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer"
+                      }
+                    },
+                    "created": {
+                      "type": "integer"
+                    },
+                    "skipped": {
+                      "type": "integer"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "start_date": {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    "end_date": {
+                      "type": "string",
+                      "format": "date"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {}
+}
