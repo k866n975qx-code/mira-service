@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -8,8 +9,19 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 import yfinance as yf
+from app.services.securities import resolve_symbol_from_cusip, should_overwrite_symbol
 
 from app.infra.models import LMTransaction, DividendEvent
+
+# --- Simple in-process TTL cache for yfinance profiles ---
+_DIVIDEND_PROFILE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+
+def _yf_cache_ttl_seconds() -> int:
+    try:
+        return int(os.getenv("MIRA_YF_CACHE_TTL_SECONDS", "3600"))  # default 1h
+    except Exception:
+        return 3600
 
 
 # ---------- Internal helpers ----------
@@ -240,11 +252,17 @@ def summarize_dividends(
 # ---------- Public: forward / ex-date info via yfinance ----------
 
 
-def get_symbol_dividend_profile(symbol: str) -> Dict[str, Any]:
+def get_symbol_dividend_profile(symbol: str, bypass_cache: bool = False) -> Dict[str, Any]:
     """
     Use yfinance to fetch historical dividends and a simple
     forward-looking estimate for one symbol.
     """
+    now = datetime.utcnow()
+    if not bypass_cache:
+        entry = _DIVIDEND_PROFILE_CACHE.get(symbol)
+        if entry and entry.get("expires_at") and entry["expires_at"] > now:
+            return entry["profile"]
+
     ticker = yf.Ticker(symbol)
 
     # Historical ex-dividend dates (index = ex-date, value = cash/share)
@@ -255,6 +273,7 @@ def get_symbol_dividend_profile(symbol: str) -> Dict[str, Any]:
 
     history: List[Dict[str, Any]] = []
     trailing_12m = 0.0
+    last_ex_date: Optional[str] = None
 
     if divs is not None and not divs.empty:
         cutoff = datetime.today().date() - timedelta(days=365)
@@ -275,20 +294,94 @@ def get_symbol_dividend_profile(symbol: str) -> Dict[str, Any]:
     except Exception:
         info = {}
 
+    # Most recent ex-dividend date (Series index is ex-date)
+    try:
+        if divs is not None and len(divs):
+            last_ex_date = divs.index.max().date().isoformat()
+    except Exception:
+        last_ex_date = None
+
     indicated_annual = float(info.get("dividendRate") or 0.0)
     indicated_yield = float(info.get("dividendYield") or 0.0)
 
-    return {
+    # Annualized forward per-share using recent ex-date history
+    annualized_forward_per_share = 0.0
+    forward_method = "indicated"
+    try:
+        if divs is not None and len(divs):
+            today = date.today()
+            cutoff = today - timedelta(days=365)
+            total_12m = 0.0
+            payouts_12m = 0
+            earliest_dt: Optional[date] = None
+            for idx, cash in divs.items():
+                try:
+                    d = idx.date()
+                except Exception:
+                    continue
+                if earliest_dt is None or d < earliest_dt:
+                    earliest_dt = d
+                if d >= cutoff:
+                    payouts_12m += 1
+                    try:
+                        total_12m += float(cash or 0.0)
+                    except Exception:
+                        pass
+
+            has_12m_history = bool(earliest_dt and earliest_dt <= cutoff)
+            try:
+                last3 = float(divs.tail(3).sum())
+            except Exception:
+                last3 = 0.0
+            try:
+                last4 = float(divs.tail(4).sum())
+            except Exception:
+                last4 = 0.0
+
+            if has_12m_history and total_12m > 0:
+                annualized_forward_per_share = total_12m
+                forward_method = "t12m"
+            elif payouts_12m >= 6 and last3 > 0:
+                annualized_forward_per_share = last3 * 4.0
+                forward_method = "3mo_annualized"
+            elif 3 <= payouts_12m <= 5 and last4 > 0:
+                annualized_forward_per_share = last4
+                forward_method = "4payouts"
+            else:
+                annualized_forward_per_share = indicated_annual
+                forward_method = "indicated"
+        else:
+            annualized_forward_per_share = indicated_annual
+            forward_method = "indicated"
+    except Exception:
+        annualized_forward_per_share = indicated_annual
+        forward_method = "indicated"
+
+    result = {
         "symbol": symbol,
         "trailing_12m_div_per_share": round(trailing_12m, 4),
         "indicated_annual_div_per_share": round(indicated_annual, 4),
         "indicated_dividend_yield": indicated_yield,
         "ex_div_history": history,
+        "last_ex_date": last_ex_date,
+        "annualized_forward_per_share": round(annualized_forward_per_share, 4),
+        "forward_method": forward_method,
     }
+
+    try:
+        ttl = _yf_cache_ttl_seconds()
+        _DIVIDEND_PROFILE_CACHE[symbol] = {
+            "profile": result,
+            "expires_at": datetime.utcnow() + timedelta(seconds=ttl),
+        }
+    except Exception:
+        pass
+
+    return result
 
 
 def estimate_forward_dividends_for_holdings(
-    holdings: List[Dict[str, Any]],
+    holdings: List[Dict[str, Any]], bypass_cache: bool = False
 ) -> Dict[str, Any]:
     """
     Given holdings from the /lm/holdings snapshot (each with symbol & shares),
@@ -300,15 +393,19 @@ def estimate_forward_dividends_for_holdings(
     for h in holdings:
         symbol = h["symbol"]
         shares = float(h["shares"])
-        profile = get_symbol_dividend_profile(symbol)
+        profile = get_symbol_dividend_profile(symbol, bypass_cache=bypass_cache)
 
-        # Prefer indicated annual rate if present; fall back to trailing 12m.
-        annual_per_share = profile["indicated_annual_div_per_share"] or profile[
-            "trailing_12m_div_per_share"
-        ]
+        # Prefer computed annualized rate from ex-date history; then indicated; then trailing 12m
+        annual_per_share = float(
+            profile.get("annualized_forward_per_share")
+            or profile.get("indicated_annual_div_per_share")
+            or profile.get("trailing_12m_div_per_share")
+            or 0.0
+        )
 
         forward_12m = round(annual_per_share * shares, 2)
         total_forward_12m += forward_12m
+        projected_monthly_dividend = round(forward_12m / 12.0, 2)
 
         per_symbol[symbol] = {
             "symbol": symbol,
@@ -316,6 +413,9 @@ def estimate_forward_dividends_for_holdings(
             "annual_div_per_share": round(annual_per_share, 4),
             "forward_12m_dividend": forward_12m,
             "indicated_yield": profile["indicated_dividend_yield"],
+            "last_ex_date": profile.get("last_ex_date"),
+            "forward_method": profile.get("forward_method"),
+            "projected_monthly_dividend": projected_monthly_dividend,
         }
 
     return {
@@ -341,6 +441,13 @@ def sync_dividend_events_from_transactions(
 
     events = extract_dividend_events(tx_by_id.values())
     persisted: List[DividendEvent] = []
+
+    # Resolve symbols from CUSIP when parser extracted a stop-word (e.g., "OF")
+    for ev in events:
+        if should_overwrite_symbol(ev.symbol) and ev.cusip:
+            resolved = resolve_symbol_from_cusip(db, ev.cusip)
+            if resolved:
+                ev.symbol = resolved
 
     for ev in events:
         tx = tx_by_id.get(ev.tx_id)
@@ -379,6 +486,7 @@ def sync_dividend_events_from_transactions(
                 source="plaid",
                 raw=raw_payload,
             )
+            # de.symbol already set above if resolved; ensure consistency
             db.add(de)
             persisted.append(de)
         else:

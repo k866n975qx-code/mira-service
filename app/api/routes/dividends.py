@@ -34,6 +34,7 @@ def get_dividend_events(
     ),
     db: Session = Depends(get_db),
 ) -> Dict:
+    """List cleaned dividend events (CUSIP→ticker resolved) within an optional date window."""
     # Handle default dates
     if end_date is None:
         end_date = date.today()

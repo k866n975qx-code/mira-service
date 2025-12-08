@@ -1,58 +1,154 @@
 from __future__ import annotations
 
-from typing import Dict, List
+import os
+from datetime import date, datetime, timedelta
+from typing import Any, Dict, List
 
+import pandas as pd
 import yfinance as yf
 
+# In-process TTL cache for latest prices
+_LATEST_PRICE_CACHE: Dict[str, Dict[str, Any]] = {}
 
-def get_latest_prices(symbols: List[str]) -> Dict[str, float]:
+
+def _price_cache_ttl_seconds() -> int:
+    try:
+        return int(os.getenv("MIRA_PRICE_CACHE_TTL_SECONDS", "3600"))
+    except Exception:
+        return 3600
+
+
+def get_latest_prices(symbols: List[str], bypass_cache: bool = False) -> Dict[str, float]:
     """
     Fetch latest close prices for a list of ticker symbols using yfinance.
-    Returns a dict: { "JEPI": 56.12, "SCHD": 31.45, ... }
     """
     prices: Dict[str, float] = {}
+    now = datetime.utcnow()
+    ttl = _price_cache_ttl_seconds()
 
-    # yfinance can batch-request, but we'll keep it simple + robust for now
-    for symbol in symbols:
+    # cache first
+    misses: List[str] = []
+    for sym in symbols:
+        if not bypass_cache:
+            entry = _LATEST_PRICE_CACHE.get(sym)
+            if entry and entry.get("expires_at") and entry["expires_at"] > now:
+                prices[sym] = entry["price"]
+                continue
+        misses.append(sym)
+
+    # batch download for remaining symbols
+    if len(misses) >= 2:
         try:
-            ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                last_close = float(hist["Close"].iloc[-1])
-                prices[symbol] = last_close
+            df = yf.download(
+                misses,
+                period="1d",
+                group_by="ticker",
+                auto_adjust=False,
+                threads=True,
+                progress=False,
+            )
+            if df is not None and not df.empty and isinstance(df.columns, pd.MultiIndex):
+                close_df = df["Close"]
+                for sym in close_df.columns:
+                    try:
+                        series = pd.to_numeric(close_df[sym], errors="coerce").dropna()
+                        if series.empty:
+                            continue
+                        val = float(series.iloc[-1])
+                        prices[sym] = val
+                        _LATEST_PRICE_CACHE[sym] = {
+                            "price": val,
+                            "expires_at": now + timedelta(seconds=ttl),
+                        }
+                        if sym in misses:
+                            misses.remove(sym)
+                    except Exception:
+                        continue
         except Exception:
-            # If anything blows up for a symbol, just skip it for now
+            pass
+
+    # fetch any remaining individually
+    for sym in list(misses):
+        try:
+            hist = yf.Ticker(sym).history(period="1d")
+            if hist is not None and not hist.empty and "Close" in hist.columns:
+                val = float(hist["Close"].iloc[-1])
+                prices[sym] = val
+                _LATEST_PRICE_CACHE[sym] = {
+                    "price": val,
+                    "expires_at": now + timedelta(seconds=ttl),
+                }
+        except Exception:
             continue
 
     return prices
-from datetime import date
-from typing import Dict, List
-import yfinance as yf
 
 
-def get_price_history(
-    symbols: List[str],
-    start: date,
-    end: date,
-) -> Dict[str, Dict[str, float]]:
+def get_daily_prices(symbols: List[str], days: int = 90) -> Dict[str, Dict[str, float]]:
+    """
+    Fetch daily close prices for the past N days for each symbol.
+    Returns {SYM: {YYYY-MM-DD: close}}.
+    """
+    if not symbols or days <= 0:
+        return {}
+
+    result: Dict[str, Dict[str, float]] = {}
+    try:
+        df = yf.download(
+            symbols,
+            period=f"{int(days)}d",
+            group_by="ticker",
+            auto_adjust=False,
+            threads=True,
+            progress=False,
+        )
+    except Exception:
+        df = None
+
+    if df is None or df.empty:
+        return result
+
+    if isinstance(df.columns, pd.MultiIndex):
+        try:
+            close_df = df["Close"]
+            for sym in close_df.columns:
+                series = pd.to_numeric(close_df[sym], errors="coerce").dropna()
+                if series.empty:
+                    result[sym] = {}
+                    continue
+                daily: Dict[str, float] = {}
+                for idx, val in series.items():
+                    try:
+                        daily[idx.date().isoformat()] = float(val)
+                    except Exception:
+                        continue
+                result[sym] = daily
+        except Exception:
+            return result
+    else:
+        try:
+            series = pd.to_numeric(df["Close"], errors="coerce").dropna()
+            daily: Dict[str, float] = {}
+            for idx, val in series.items():
+                try:
+                    daily[idx.date().isoformat()] = float(val)
+                except Exception:
+                    continue
+            if symbols:
+                result[symbols[0]] = daily
+        except Exception:
+            return result
+
+    return result
+
+
+def get_price_history(symbols: List[str], start: date, end: date) -> Dict[str, Dict[str, float]]:
     """
     Return daily close prices for each symbol between start and end (inclusive).
-
-    Output shape:
-    {
-        "VTI": {
-            "2025-11-01": 250.12,
-            "2025-11-02": 251.34,
-            ...
-        },
-        "JEPI": { ... },
-        ...
-    }
     """
     if not symbols:
         return {}
 
-    # yfinance wants strings
     start_str = start.isoformat()
     end_str = end.isoformat()
 
@@ -62,7 +158,6 @@ def get_price_history(
         try:
             hist = yf.Ticker(sym).history(start=start_str, end=end_str)
         except Exception:
-            # if yfinance explodes for a ticker, just skip it
             result[sym] = {}
             continue
 
@@ -70,7 +165,6 @@ def get_price_history(
             result[sym] = {}
             continue
 
-        # hist.index is a DatetimeIndex; we map to YYYY-MM-DD -> close
         daily_prices: Dict[str, float] = {}
         for idx, row in hist.iterrows():
             day_str = idx.date().isoformat()

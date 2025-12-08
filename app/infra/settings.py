@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     lunchmoney_api_key: str | None = None
     lunchmoney_base_url: str = "https://api.lunchmoney.app/v1"
 
+    # --- CUSIP catalog ---
+    cusip_csv_path: str | None = "CUSIP.csv"
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
