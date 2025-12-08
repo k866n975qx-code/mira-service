@@ -13,6 +13,7 @@
   "paths": {
     "/": {
       "get": {
+        "operationId": "getRoot",
         "tags": [
           "meta"
         ],
@@ -41,6 +42,7 @@
     },
     "/health": {
       "get": {
+        "operationId": "getHealth",
         "tags": [
           "health"
         ],
@@ -73,6 +75,7 @@
     },
     "/lm/holdings/{plaid_account_id}/snapshot": {
       "get": {
+        "operationId": "getHoldingsSnapshot",
         "tags": [
           "holdings"
         ],
@@ -390,6 +393,7 @@
     },
     "/lm/dividends/events": {
       "get": {
+        "operationId": "getDividendEvents",
         "tags": [
           "dividends"
         ],
@@ -513,6 +517,7 @@
     },
     "/lm/sync/transactions/all": {
       "post": {
+        "operationId": "syncAllTransactions",
         "tags": [
           "lunchmoney"
         ],
@@ -585,5 +590,7 @@
       }
     }
   },
-  "components": {}
+  "components": {
+    "schemas": {}
+  }
 }

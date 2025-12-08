@@ -12,6 +12,7 @@ servers:
 paths:
   /:
     get:
+      operationId: getRoot
       tags: [meta]
       summary: Service root
       responses:
@@ -29,6 +30,7 @@ paths:
 
   /health:
     get:
+      operationId: getHealth
       tags: [health]
       summary: Health check
       description: Pings service and DB connectivity.
@@ -49,6 +51,7 @@ paths:
 
   /lm/holdings/{plaid_account_id}/snapshot:
     get:
+      operationId: getHoldingsSnapshot
       tags: [holdings]
       summary: Get holdings snapshot for a Plaid investment account
       parameters:
@@ -258,6 +261,7 @@ paths:
 
   /lm/dividends/events:
     get:
+      operationId: getDividendEvents
       tags: [dividends]
       summary: List realized dividend events
       parameters:
@@ -341,6 +345,7 @@ paths:
 
   /lm/sync/transactions/all:
     post:
+      operationId: syncAllTransactions
       tags: [lunchmoney]
       summary: Sync all Lunch Money transactions (M1-only)
       requestBody:
@@ -386,3 +391,6 @@ paths:
                   end_date:
                     type: string
                     format: date
+
+components:
+  schemas: {}
