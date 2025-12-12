@@ -225,8 +225,8 @@ def get_valued_holdings_for_plaid_account(
         current_margin = abs(current_margin)
         monthly_income = float(income.get("projected_monthly_income") or 0.0)
 
-        cur_apr = float(apr_current_pct if apr_current_pct is not None else 4.4)
-        fut_apr = float(apr_future_pct if apr_future_pct is not None else 5.9)
+        cur_apr = float(apr_current_pct if apr_current_pct is not None else 4.15)
+        fut_apr = float(apr_future_pct if apr_future_pct is not None else 5.65)
         fut_date = apr_future_date or date(2026, 11, 1)
 
         presets = {
