@@ -1,19 +1,35 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+import copy
+import time
+from datetime import date, datetime, timedelta, timezone
 from math import ceil, log
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.services.lm_client import LunchMoneyClient
+from app.services.snapshot_normalizer import (
+    build_and_cache_snapshot,
+    cache_snapshot,
+    compute_cache_key,
+    load_snapshot,
+    normalize_snapshot,
+    validate_snapshot,
+)
 from app.api.deps import get_db
 from app.infra.models import DividendEvent, HoldingSnapshot, LMTransaction
 from app.services.holdings import reconstruct_holdings
 from app.services.pricing import get_latest_prices, _price_cache_ttl_seconds
 from app.services.securities import resolve_symbol_from_cusip, should_overwrite_symbol
+from app.services.enrich import enrich_holding
+from app.services.portfolio import compute_portfolio_rollups
+from app.services.enrich_fallback import ensure_minimal_ultimate
+from app.services.dividends_projector import project_paydate_window, project_upcoming_exdates
 from app.services.dividends import (
     extract_dividend_events,
     summarize_dividends,
@@ -21,6 +37,9 @@ from app.services.dividends import (
     _yf_cache_ttl_seconds,
 )
 
+
+# Cache snapshots for 6 hours to reduce rebuild frequency while keeping data reasonably fresh.
+SNAPSHOT_CACHE_TTL_SECONDS = 6 * 3600
 
 router = APIRouter(prefix="/lm/holdings", tags=["holdings"])
 
@@ -65,6 +84,23 @@ def _resolve_event_symbols(db: Session, events: list) -> None:
                 resolved = resolve_symbol_from_cusip(db, cusip)
                 if resolved:
                     ev.symbol = resolved
+
+
+def _discover_m1_investment_account_ids(client: LunchMoneyClient) -> List[int]:
+    """List plaid_account_ids for M1 investment accounts from Lunch Money."""
+    accounts = client.get_plaid_accounts() or []
+    ids: List[int] = []
+    for acc in accounts:
+        inst = (acc.get("institution_name") or "").strip()
+        typ = (acc.get("type") or acc.get("account_type") or "").strip().lower()
+        name = (acc.get("name") or "").strip().lower()
+        if inst == "M1 Finance" and (typ == "investment" or "invest" in name):
+            pid = acc.get("id") or acc.get("plaid_account_id") or (acc.get("plaid_account") or {}).get("id")
+            try:
+                ids.append(int(pid))
+            except Exception:
+                continue
+    return sorted(list({i for i in ids}))
 
 
 def _summarize_events_from_db(
@@ -144,6 +180,13 @@ def get_valued_holdings_for_plaid_account(
     apr_future_pct: Optional[float] = Query(None, description="Future APR after promo (e.g., 5.9)"),
     apr_future_date: Optional[date] = Query(None, description="When the future APR begins (e.g., 2026-11-01)"),
     margin_mode: Optional[str] = Query(None, description="preferred mode to highlight: conservative|balanced|aggressive"),
+    enrich: Optional[bool] = Query(True, description="Attach data-rich metrics under holding.ultimate"),
+    perf: Optional[bool] = Query(True, description="Attach portfolio-level performance and risk rollups"),
+    perf_method: Optional[str] = Query("accurate", description="Performance method: accurate|approx (default accurate)"),
+    slim: bool = Query(
+        False,
+        description="Return a compact snapshot (drop provenance, condense holdings metadata, round decimals).",
+    ),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     """
@@ -183,6 +226,21 @@ def get_valued_holdings_for_plaid_account(
                     est_date = (as_of_date + timedelta(days=months_to_goal * 30)).isoformat()
         except Exception:
             pass
+        if months_to_goal is None:
+            # Conservative fallback if we cannot infer growth from history.
+            if target <= current:
+                months_to_goal = 0
+                est_date = as_of_date.isoformat()
+            else:
+                assumed_growth = 0.0025  # ~3% annualized growth
+                if current > 0 and assumed_growth > 0:
+                    months_to_goal = int(ceil(log(target / current) / log(1.0 + assumed_growth)))
+                else:
+                    months_to_goal = 240  # 20-year placeholder
+                est_date = (as_of_date + timedelta(days=months_to_goal * 30)).isoformat()
+        if months_to_goal is not None and months_to_goal > 480:
+            months_to_goal = None
+            est_date = None
 
         payload["goal_progress"] = {
             "target_monthly": target,
@@ -211,6 +269,65 @@ def get_valued_holdings_for_plaid_account(
                 if portfolio_yield_pct and float(portfolio_yield_pct) > 0.0
                 else None
             ),
+            "growth_window_months": max(3, len(last3_keys)) if last3_keys else 3,
+        }
+
+        # Net of margin interest variant
+        portfolio_yield_pct = income.get("portfolio_current_yield_pct")
+        margin_balance = float(payload.get("margin_loan_balance") or 0.0)
+        margin_balance = abs(margin_balance)
+        cur_apr_val = float(apr_current_pct if apr_current_pct is not None else 4.15)
+        fut_apr_val = float(apr_future_pct if apr_future_pct is not None else 5.65)
+        cur_interest = round(margin_balance * (cur_apr_val / 100.0) / 12.0, 2)
+        fut_interest = round(margin_balance * (fut_apr_val / 100.0) / 12.0, 2)
+
+        def _req_value(interest: float, rate_pct: Optional[float]) -> Optional[float]:
+            if rate_pct is None or rate_pct <= 0:
+                return None
+            return ((target + interest) * 12.0) / (rate_pct / 100.0)
+
+        req_now = _req_value(cur_interest, portfolio_yield_pct)
+        req_future = _req_value(fut_interest, portfolio_yield_pct)
+        addl_now = (
+            max(0.0, (req_now - portfolio_value)) if req_now is not None else None
+        )
+        addl_future = (
+            max(0.0, (req_future - portfolio_value)) if req_future is not None else None
+        )
+        current_net = max(0.0, current - cur_interest)
+        progress_net = (
+            round((current_net / target * 100.0), 2) if target > 0 else None
+        )
+        progress_net_future = (
+            round(((max(0.0, current - fut_interest)) / target * 100.0), 2)
+            if target > 0
+            else None
+        )
+
+        payload["goal_progress_net"] = {
+            "target_monthly": target,
+            "current_projected_monthly_net": round(current_net, 3),
+            "progress_pct": progress_net,
+            "portfolio_yield_pct": portfolio_yield_pct,
+            "assumptions": "same_yield_structure; loan unchanged",
+            "required_portfolio_value_at_goal_now": round(req_now, 2)
+            if req_now is not None
+            else None,
+            "additional_investment_needed_now": round(addl_now, 2)
+            if addl_now is not None
+            else None,
+            "monthly_interest_now": cur_interest,
+            "future_rate_sensitivity": {
+                "apr_future_pct": fut_apr_val,
+                "monthly_interest_future": fut_interest,
+                "required_portfolio_value_at_goal_future": round(req_future, 2)
+                if req_future is not None
+                else None,
+                "additional_investment_needed_future": round(addl_future, 2)
+                if addl_future is not None
+                else None,
+                "progress_pct_future": progress_net_future,
+            },
         }
 
     def _inject_margin_guidance(payload: Dict[str, Any], as_of_date: date) -> None:
@@ -265,17 +382,28 @@ def get_valued_holdings_for_plaid_account(
             if repay_needed > 0.0:
                 action = "repay"
                 amount = round(repay_needed, 2)
+                new_loan = max(0.0, current_margin - amount)
             elif borrow_capacity > 0.0:
                 action = "borrow_up_to"
                 amount = round(borrow_capacity, 2)
+                new_loan = current_margin + amount
             else:
                 action = "maintain"
                 amount = 0.0
+                new_loan = current_margin
 
             i_now = round(r_now * current_margin, 2) if r_now > 0 else 0.0
             cov_now = round((monthly_income / i_now), 3) if i_now > 0 else None
             i_future = round(r_fut * current_margin, 2) if r_fut > 0 else 0.0
             cov_future = round((monthly_income / i_future), 3) if i_future > 0 else None
+
+            ltv_after = (
+                (new_loan / portfolio_value * 100.0) if portfolio_value > 0 else None
+            )
+            i_now_after = round(r_now * new_loan, 2) if r_now > 0 else 0.0
+            cov_now_after = (
+                round((monthly_income / i_now_after), 3) if i_now_after > 0 else None
+            )
 
             return {
                 "mode": mode_name,
@@ -287,6 +415,12 @@ def get_valued_holdings_for_plaid_account(
                 "income_interest_coverage_now": cov_now,
                 "monthly_interest_future": i_future,
                 "income_interest_coverage_future": cov_future,
+                "after_action": {
+                    "new_loan_balance": round(new_loan, 2),
+                    "ltv_after_action_pct": round(ltv_after, 3) if ltv_after is not None else None,
+                    "monthly_interest_now": i_now_after,
+                    "income_interest_coverage_now": cov_now_after,
+                },
                 "constraints": {
                     "max_margin_pct": p["max_margin_pct"],
                     "stress_drawdown_pct": p["stress_drawdown_pct"],
@@ -317,7 +451,7 @@ def get_valued_holdings_for_plaid_account(
     last_transaction_sync_at = _get_last_transaction_sync_at()
 
     def _build_meta(served_from: str, snapshot_created_at: datetime) -> Dict[str, Any]:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         age_days: Optional[int] = None
         if snapshot_created_at:
             try:
@@ -331,6 +465,8 @@ def get_valued_holdings_for_plaid_account(
             "last_transaction_sync_at": (
                 last_transaction_sync_at.isoformat() if last_transaction_sync_at else None
             ),
+            # Allow snapshots to be cached/stored; honor normal TTLs unless refresh is requested
+            "cache_control": {"no_store": False, "revalidate": "when-stale"},
             "cache": {
                 "yf_dividends": {
                     "ttl_seconds": _yf_cache_ttl_seconds(),
@@ -342,6 +478,38 @@ def get_valued_holdings_for_plaid_account(
                 },
             },
         }
+
+    def _round_numbers(obj: Any) -> Any:
+        """Recursively round floats/Decimals to 3 decimals to shrink payloads."""
+        if isinstance(obj, bool):
+            return obj
+        if isinstance(obj, float):
+            return round(obj, 3)
+        if isinstance(obj, Decimal):
+            return round(float(obj), 3)
+        if isinstance(obj, list):
+            return [_round_numbers(v) for v in obj]
+        if isinstance(obj, dict):
+            for k, v in list(obj.items()):
+                obj[k] = _round_numbers(v)
+            return obj
+        return obj
+
+    def _slim_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Build a compact copy of the snapshot:
+        - Drop heavy provenance
+        - Round numeric noise
+        """
+        data = copy.deepcopy(snapshot)
+        holdings = data.get("holdings") or []
+        for h in holdings:
+            h.pop("ultimate_provenance", None)
+        data = _round_numbers(data)
+        return data
+
+    def _maybe_slim(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        return _slim_snapshot(snapshot) if slim else snapshot
 
     # --- Fast path: return latest cached snapshot unless refresh requested ---
     if not refresh:
@@ -366,11 +534,152 @@ def get_valued_holdings_for_plaid_account(
             payload.setdefault("plaid_account_id", plaid_account_id)
             payload.setdefault("as_of", existing.as_of_date.isoformat())
             payload["cached"] = True
-            _inject_goal_progress(payload, existing.as_of_date)
-            _inject_margin_guidance(payload, existing.as_of_date)
-            created_at = getattr(existing, "created_at", None) or datetime.utcnow()
+            as_of_cached = existing.as_of_date
+
+            # Ensure per-holding minimal enrichment for approx calculations
+            try:
+                ensure_minimal_ultimate(payload.get("holdings", []), as_of_cached)
+            except Exception:
+                pass
+
+            # Repair portfolio_rollups if missing/empty
+            if perf:
+                pr = payload.get("portfolio_rollups") or {}
+                perf_block = pr.get("performance") or {}
+                risk_block = pr.get("risk") or {}
+                needs_rollups = (not perf_block) or (not risk_block) or ("composition" not in pr)
+                if needs_rollups and compute_portfolio_rollups:
+                    recomputed = None
+                    try:
+                        recomputed = compute_portfolio_rollups(
+                            plaid_account_id,
+                            as_of_cached,
+                            payload.get("holdings", []),
+                            perf_method=perf_method or "accurate",
+                            include_mwr=True,
+                        )
+                    except Exception:
+                        pass
+                    if recomputed is None:
+                        try:
+                            recomputed = compute_portfolio_rollups(
+                                plaid_account_id,
+                                as_of_cached,
+                                payload.get("holdings", []),
+                                perf_method="approx",
+                                include_mwr=False,
+                            )
+                        except Exception:
+                            recomputed = None
+                    if recomputed is not None:
+                        recomputed.setdefault("meta", {}).setdefault(
+                            "note", "Restored after cached omission."
+                        )
+                        payload["portfolio_rollups"] = recomputed
+                # final guard: ensure block exists even if recompute failed
+                if not payload.get("portfolio_rollups") or not payload["portfolio_rollups"].get("performance"):
+                    payload["portfolio_rollups"] = payload.get("portfolio_rollups") or {}
+                    payload["portfolio_rollups"].setdefault("performance", {})
+                    payload["portfolio_rollups"].setdefault("risk", {})
+                    payload["portfolio_rollups"].setdefault("benchmark", "^GSPC")
+                    payload["portfolio_rollups"].setdefault(
+                        "meta",
+                        {"method": "approx-fallback", "note": "Restored after cached omission."},
+                    )
+
+            # Repair dividends block if missing/null
+            divs = payload.get("dividends")
+            if not divs or not divs.get("realized_mtd") or divs.get("projected_vs_received") is None:
+                try:
+                    forward_total_cached = float(
+                        (payload.get("income") or {}).get("forward_12m_total") or 0.0
+                    )
+                    mtd_start = as_of_cached.replace(day=1)
+                    realized_mtd_raw = _summarize_events_from_db(
+                        db, plaid_account_id, mtd_start, as_of_cached
+                    )
+                    mtd_realized = float(realized_mtd_raw.get("total_dividends") or 0.0)
+                    projected_monthly = round(forward_total_cached / 12.0, 3) if forward_total_cached else 0.0
+                    projected_vs_received = {
+                        "window": {
+                            "label": "month_to_date",
+                            "start": mtd_start.isoformat(),
+                            "end": as_of_cached.isoformat(),
+                        },
+                        "projected": projected_monthly,
+                        "received": round(mtd_realized, 3),
+                        "difference": round(projected_monthly - mtd_realized, 3),
+                        "pct_of_projection": round(
+                            (mtd_realized / projected_monthly) * 100.0, 2
+                        )
+                        if projected_monthly > 0
+                        else None,
+                    }
+                    try:
+                        paydate_proj = project_paydate_window(payload.get("holdings", []), mtd_start, as_of_cached)
+                        if paydate_proj is not None:
+                            projected_vs_received["alt"] = paydate_proj
+                    except Exception:
+                        pass
+
+                    # Additional windows
+                    start_30d = as_of_cached - timedelta(days=30)
+                    sum_30d = _summarize_events_from_db(db, plaid_account_id, start_30d, as_of_cached)
+                    start_qtd = _quarter_start(as_of_cached)
+                    sum_qtd = _summarize_events_from_db(db, plaid_account_id, start_qtd, as_of_cached)
+                    start_ytd = date(as_of_cached.year, 1, 1)
+                    sum_ytd = _summarize_events_from_db(db, plaid_account_id, start_ytd, as_of_cached)
+
+                    def _tag_status(window: Dict[str, Any]) -> Dict[str, Any]:
+                        by_sym = window.get("by_symbol") or {}
+                        tagged: Dict[str, Any] = {}
+                        active_syms = {h.get("symbol") for h in payload.get("holdings", []) if h.get("symbol")}
+                        for sym, amt in by_sym.items():
+                            try:
+                                amt_val = float(amt)
+                            except Exception:
+                                amt_val = amt
+                            tagged[sym] = {
+                                "amount": amt_val,
+                                "status": "active" if sym in active_syms else "inactive",
+                            }
+                        window["by_symbol"] = tagged
+                        return window
+
+                    sum_30d = _tag_status(sum_30d)
+                    sum_qtd = _tag_status(sum_qtd)
+                    sum_ytd = _tag_status(sum_ytd)
+                    sum_mtd_tagged = _tag_status(realized_mtd_raw)
+                    realized_mtd_raw["by_symbol"] = sum_mtd_tagged.get("by_symbol", {})
+
+                    payload["dividends"] = {
+                        "realized_mtd": realized_mtd_raw,
+                        "realized_mtd_detail": sum_mtd_tagged.get("by_symbol"),
+                        "projected_vs_received": projected_vs_received,
+                        "windows": {
+                            "30d": sum_30d,
+                            "qtd": sum_qtd,
+                            "ytd": sum_ytd,
+                        },
+                    }
+                except Exception:
+                    pass
+
+            _inject_goal_progress(payload, as_of_cached)
+            _inject_margin_guidance(payload, as_of_cached)
+            created_at = getattr(existing, "created_at", None) or datetime.now(timezone.utc)
             payload["meta"] = _build_meta("db", created_at)
-            return payload
+
+            cache_key = compute_cache_key(payload)
+            cached_snapshot = load_snapshot(cache_key)
+            if cached_snapshot:
+                return _maybe_slim(cached_snapshot)
+
+            normalized_payload = normalize_snapshot(payload)
+            validate_snapshot(normalized_payload, raise_on_error=True)
+            normalized_payload["cached"] = True
+            cache_snapshot(cache_key, normalized_payload, ttl=SNAPSHOT_CACHE_TTL_SECONDS)
+            return _maybe_slim(normalized_payload)
 
     as_of = as_of or date.today()
 
@@ -598,12 +907,78 @@ def get_valued_holdings_for_plaid_account(
         else None,
     }
 
+    # --- enrichment (data-rich metrics per holding) ---
+    try:
+        if enrich:
+            for h in holdings:
+                sym = h.get("symbol")
+                if not sym:
+                    continue
+                last_price = float(h.get("last_price") or 0.0)
+                last_ex_date = h.get("last_ex_date")
+                try:
+                    ultimate = enrich_holding(sym, last_price, last_ex_date, as_of)
+                    if ultimate:
+                        h["ultimate"] = ultimate
+                except Exception:
+                    # do not break snapshot if enrichment fails for one symbol
+                    pass
+    except Exception:
+        pass
+
+    # Minimal fallback enrichment so approx TWR can always run
+    try:
+        ensure_minimal_ultimate(holdings, as_of)
+    except Exception:
+        pass
+
+    # --- portfolio rollups (performance, MWR, risk) ---
+    if perf:
+        rollups = None
+        try:
+            rollups = compute_portfolio_rollups(
+                plaid_account_id,
+                as_of,
+                holdings,
+                perf_method=perf_method or "accurate",
+                include_mwr=True,
+            )
+        except Exception:
+            rollups = None
+        if rollups is None:
+            try:
+                rollups = compute_portfolio_rollups(
+                    plaid_account_id,
+                    as_of,
+                    holdings,
+                    perf_method="approx",
+                    include_mwr=False,
+                )
+                rollups.setdefault("meta", {}).setdefault(
+                    "note", "Restored after temporary omission."
+                )
+            except Exception:
+                rollups = {
+                    "performance": {},
+                    "risk": {},
+                    "benchmark": "^GSPC",
+                    "meta": {
+                        "method": "approx-fallback",
+                        "note": "Restored after temporary omission.",
+                    },
+                }
+        if not rollups.get("performance"):
+            rollups.setdefault("meta", {}).setdefault(
+                "note", "Restored after temporary omission."
+            )
+        result["portfolio_rollups"] = rollups
+
     # --- realized dividends + projected vs received (month-to-date) ---
     try:
         # Compute realized dividends from persisted DB events (faster & symbol-correct)
         mtd_start = as_of.replace(day=1)
-        realized_mtd = _summarize_events_from_db(db, plaid_account_id, mtd_start, as_of)
-        mtd_realized = float(realized_mtd.get("total_dividends") or 0.0)
+        realized_mtd_raw = _summarize_events_from_db(db, plaid_account_id, mtd_start, as_of)
+        mtd_realized = float(realized_mtd_raw.get("total_dividends") or 0.0)
 
         projected_monthly = round(forward_total / 12.0, 3) if forward_total else 0.0
 
@@ -623,7 +998,25 @@ def get_valued_holdings_for_plaid_account(
             else None,
         }
 
-        # Additional windows from DB events: 30d / QTD / YTD
+        try:
+            paydate_proj = project_paydate_window(holdings, mtd_start, as_of)
+        except Exception:
+            paydate_proj = None
+        if paydate_proj is not None:
+            projected_vs_received["alt"] = paydate_proj
+        # upcoming ex-dates to end of month
+        try:
+            eom = (as_of.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+            start_upcoming = as_of + timedelta(days=1)
+            if start_upcoming <= eom:
+                upcoming = project_upcoming_exdates(holdings, start_upcoming, eom)
+                result["dividends_upcoming"] = upcoming
+                if isinstance(upcoming, dict) and "meta" in upcoming:
+                    result["dividends_upcoming_meta"] = upcoming["meta"]
+        except Exception:
+            pass
+
+        # Additional windows from DB events: MTD breakdown + 30d / QTD / YTD
         start_30d = as_of - timedelta(days=30)
         sum_30d = _summarize_events_from_db(db, plaid_account_id, start_30d, as_of)
         start_qtd = _quarter_start(as_of)
@@ -642,8 +1035,32 @@ def get_valued_holdings_for_plaid_account(
                 h["dividends_qtd"] = round(float(byq.get(s, 0.0)), 3)
                 h["dividends_ytd"] = round(float(byy.get(s, 0.0)), 3)
 
+        # mark inactive symbols in realized windows
+        def _tag_status(window: Dict[str, Any]) -> Dict[str, Any]:
+            by_sym = window.get("by_symbol") or {}
+            tagged: Dict[str, Any] = {}
+            active_syms = {h.get("symbol") for h in holdings if h.get("symbol")}
+            for sym, amt in by_sym.items():
+                try:
+                    amt_val = float(amt)
+                except Exception:
+                    amt_val = amt
+                tagged[sym] = {
+                    "amount": amt_val,
+                    "status": "active" if sym in active_syms else "inactive",
+                }
+            window["by_symbol"] = tagged
+            return window
+
+        sum_30d = _tag_status(sum_30d)
+        sum_qtd = _tag_status(sum_qtd)
+        sum_ytd = _tag_status(sum_ytd)
+        sum_mtd_tagged = _tag_status(realized_mtd_raw)
+        realized_mtd_raw["by_symbol"] = sum_mtd_tagged.get("by_symbol", {})
+
         result["dividends"] = {
-            "realized_mtd": realized_mtd,
+            "realized_mtd": realized_mtd_raw,
+            "realized_mtd_detail": sum_mtd_tagged.get("by_symbol"),
             "projected_vs_received": projected_vs_received,
             "windows": {
                 "30d": sum_30d,
@@ -651,19 +1068,81 @@ def get_valued_holdings_for_plaid_account(
                 "ytd": sum_ytd,
             },
         }
+
+        # Normalize by_symbol entries to {amount,status}
+        try:
+            active_syms = {h.get("symbol") for h in holdings if h.get("symbol")}
+
+            def _norm(window: Dict[str, Any]) -> None:
+                by_sym = window.get("by_symbol")
+                if not isinstance(by_sym, dict):
+                    return
+                new_map: Dict[str, Any] = {}
+                for sym, val in by_sym.items():
+                    try:
+                        amt_val = float(val if not isinstance(val, dict) else val.get("amount"))
+                    except Exception:
+                        amt_val = val if not isinstance(val, dict) else val.get("amount")
+                    status_val = (
+                        val.get("status") if isinstance(val, dict) else ("active" if sym in active_syms else "inactive")
+                    )
+                    new_map[sym] = {"amount": amt_val, "status": status_val}
+                window["by_symbol"] = new_map
+
+            divs_block = result.get("dividends") or {}
+            mtd_block = divs_block.get("realized_mtd") or {}
+            _norm(mtd_block)
+            for w in (divs_block.get("windows") or {}).values():
+                _norm(w)
+            # mirror detail
+            divs_block["realized_mtd_detail"] = mtd_block.get("by_symbol")
+            result["dividends"] = divs_block
+        except Exception:
+            pass
     except Exception:
-        # don't let dividend math break the snapshot
+        # don't let dividend math break the snapshot; return zeroed shape
+        mtd_start = as_of.replace(day=1)
+        zero_win = {
+            "label": "month_to_date",
+            "start": mtd_start.isoformat(),
+            "end": as_of.isoformat(),
+        }
         result["dividends"] = {
-            "realized_mtd": None,
-            "projected_vs_received": None,
+            "realized_mtd": {
+                "start": zero_win["start"],
+                "end": zero_win["end"],
+                "total_dividends": 0.0,
+                "by_date": {},
+                "by_month": {mtd_start.strftime("%Y-%m"): 0.0},
+                "by_symbol": {},
+            },
+            "realized_mtd_detail": {},
+            "projected_vs_received": {
+                "window": zero_win,
+                "projected": 0.0,
+                "received": 0.0,
+                "difference": 0.0,
+                "pct_of_projection": None,
+            },
+            "windows": {},
         }
 
-    snapshot_created_at = datetime.utcnow()
-    result["meta"] = _build_meta("recomputed", snapshot_created_at)
+    snapshot_created_at = datetime.now(timezone.utc)
+    result["meta"] = _build_meta("db", snapshot_created_at)
+
+    # Attach goal progress & margin guidance before normalizing/caching
+    _inject_goal_progress(result, as_of)
+    _inject_margin_guidance(result, as_of)
+    for h in result.get("holdings", []):
+        h.pop("trend", None)
+
+    cache_key = compute_cache_key(result)
+    final_snapshot = build_and_cache_snapshot(
+        result, key=cache_key, ttl=SNAPSHOT_CACHE_TTL_SECONDS
+    )
 
     # --- persist snapshot for time-travel / history ---
     try:
-        # Ensure we have an as_of for persistence (already set above)
         existing = (
             db.query(HoldingSnapshot)
             .filter(
@@ -673,23 +1152,13 @@ def get_valued_holdings_for_plaid_account(
             .one_or_none()
         )
 
-        # Attach goal progress & margin guidance before persisting and returning
-        _inject_goal_progress(result, as_of)
-        _inject_margin_guidance(result, as_of)
-        # Ensure 'trend' never persists
-        for h in result.get("holdings", []):
-            h.pop("trend", None)
-
-        snapshot_payload = dict(result)  # already plain JSON-ish types
-        snapshot_payload["cached"] = False
-
         if existing:
-            existing.snapshot = snapshot_payload
+            existing.snapshot = dict(final_snapshot)
         else:
             snap = HoldingSnapshot(
                 plaid_account_id=plaid_account_id,
                 as_of_date=as_of,
-                snapshot=snapshot_payload,
+                snapshot=dict(final_snapshot),
             )
             db.add(snap)
 
@@ -698,6 +1167,89 @@ def get_valued_holdings_for_plaid_account(
         # don't break the API just because history write failed
         db.rollback()
 
-    result["cached"] = False
+    return _maybe_slim(final_snapshot)
 
-    return result
+
+class RefreshSnapshotsRequest(BaseModel):
+    plaid_account_ids: Optional[List[int]] = None
+    as_of: Optional[date] = None
+    refresh: bool = True  # force rebuild (bypass price cache) on first run
+
+
+@router.post("/refresh", tags=["holdings"])
+def refresh_snapshots(payload: RefreshSnapshotsRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """
+    Recompute holdings snapshots for one or more plaid accounts.
+    Useful for cron/health checks to keep caches warm.
+    """
+    as_of = payload.as_of or date.today()
+    refresh_flag = bool(payload.refresh)
+
+    try:
+        client = LunchMoneyClient()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Unable to init Lunch Money client: {e}")
+
+    account_ids = payload.plaid_account_ids or []
+    if not account_ids:
+        try:
+            account_ids = _discover_m1_investment_account_ids(client)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Unable to list plaid accounts: {e}")
+
+    if not account_ids:
+        raise HTTPException(status_code=404, detail="No plaid_account_ids provided or discovered.")
+
+    overall_start = time.perf_counter()
+    results: List[Dict[str, Any]] = []
+
+    for pid in account_ids:
+        item_start = time.perf_counter()
+        try:
+            snap = get_valued_holdings_for_plaid_account(
+                plaid_account_id=pid,
+                as_of=as_of,
+                refresh=refresh_flag,
+                goal_monthly=2000.0,
+                symbols=None,
+                apr_current_pct=None,
+                apr_future_pct=None,
+                apr_future_date=None,
+                margin_mode=None,
+                enrich=True,
+                perf=True,
+                perf_method="accurate",
+                slim=False,
+                db=db,
+            )
+            elapsed = time.perf_counter() - item_start
+            meta = snap.get("meta") or {}
+            totals = snap.get("totals") or {}
+            results.append(
+                {
+                    "plaid_account_id": pid,
+                    "elapsed_sec": round(elapsed, 3),
+                    "served_from": meta.get("served_from"),
+                    "cache_origin": (meta.get("cache") or {}).get("origin") or meta.get("cache_origin"),
+                    "holdings": len(snap.get("holdings") or []),
+                    "market_value": totals.get("market_value"),
+                    "status": "ok",
+                }
+            )
+        except Exception as e:
+            results.append(
+                {
+                    "plaid_account_id": pid,
+                    "elapsed_sec": round(time.perf_counter() - item_start, 3),
+                    "error": str(e),
+                    "status": "error",
+                }
+            )
+
+    return {
+        "as_of": as_of.isoformat(),
+        "count": len(results),
+        "refresh": refresh_flag,
+        "total_sec": round(time.perf_counter() - overall_start, 3),
+        "results": results,
+    }

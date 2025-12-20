@@ -7,8 +7,11 @@ from typing import Any, Dict, List
 import pandas as pd
 import yfinance as yf
 
+from app.services.cache_utils import load_ttl_cache, store_ttl_cache
+
 # In-process TTL cache for latest prices
 _LATEST_PRICE_CACHE: Dict[str, Dict[str, Any]] = {}
+_PRICE_CACHE_NS = "latest_prices"
 
 
 def _price_cache_ttl_seconds() -> int:
@@ -25,6 +28,7 @@ def get_latest_prices(symbols: List[str], bypass_cache: bool = False) -> Dict[st
     prices: Dict[str, float] = {}
     now = datetime.utcnow()
     ttl = _price_cache_ttl_seconds()
+    use_disk_cache = not bypass_cache
 
     # cache first
     misses: List[str] = []
@@ -34,6 +38,20 @@ def get_latest_prices(symbols: List[str], bypass_cache: bool = False) -> Dict[st
             if entry and entry.get("expires_at") and entry["expires_at"] > now:
                 prices[sym] = entry["price"]
                 continue
+        if use_disk_cache:
+            disk_entry = load_ttl_cache(_PRICE_CACHE_NS, sym)
+            if disk_entry is not None:
+                try:
+                    val = float(disk_entry["price"] if isinstance(disk_entry, dict) else disk_entry)
+                except Exception:
+                    val = None
+                if val is not None:
+                    prices[sym] = val
+                    _LATEST_PRICE_CACHE[sym] = {
+                        "price": val,
+                        "expires_at": now + timedelta(seconds=ttl),
+                    }
+                    continue
         misses.append(sym)
 
     # batch download for remaining symbols
@@ -60,6 +78,11 @@ def get_latest_prices(symbols: List[str], bypass_cache: bool = False) -> Dict[st
                             "price": val,
                             "expires_at": now + timedelta(seconds=ttl),
                         }
+                        if use_disk_cache:
+                            try:
+                                store_ttl_cache(_PRICE_CACHE_NS, sym, {"price": val}, ttl)
+                            except Exception:
+                                pass
                         if sym in misses:
                             misses.remove(sym)
                     except Exception:
@@ -78,6 +101,11 @@ def get_latest_prices(symbols: List[str], bypass_cache: bool = False) -> Dict[st
                     "price": val,
                     "expires_at": now + timedelta(seconds=ttl),
                 }
+                if use_disk_cache:
+                    try:
+                        store_ttl_cache(_PRICE_CACHE_NS, sym, {"price": val}, ttl)
+                    except Exception:
+                        pass
         except Exception:
             continue
 

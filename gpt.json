@@ -167,6 +167,50 @@
               "type": "string"
             },
             "description": "Preferred margin guidance mode: conservative|balanced|aggressive."
+          },
+          {
+            "name": "enrich",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "description": "Attach enrichment (ultimate) data to holdings (default: true)."
+          },
+          {
+            "name": "perf",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "description": "Attach portfolio-level performance/risk rollups (default: true)."
+          },
+          {
+            "name": "perf_method",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "accurate",
+              "enum": [
+                "accurate",
+                "approx"
+              ]
+            },
+            "description": "Performance method: accurate|approx (default accurate)."
+          },
+          {
+            "name": "slim",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "Return a compact snapshot (drop provenance/notes, round decimals)."
           }
         ],
         "responses": {
@@ -334,7 +378,8 @@
                           "type": "string",
                           "enum": [
                             "db",
-                            "recomputed"
+                            "recomputed",
+                            "cache_db"
                           ]
                         },
                         "snapshot_created_at": {
@@ -580,6 +625,107 @@
                     "end_date": {
                       "type": "string",
                       "format": "date"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lm/holdings/refresh": {
+      "post": {
+        "operationId": "refreshHoldingsSnapshots",
+        "tags": [
+          "holdings"
+        ],
+        "summary": "Recompute holdings snapshots for one or more plaid accounts",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "plaid_account_ids": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "description": "Optional list of plaid_account_ids; if omitted, auto-discovers M1 investment accounts."
+                  },
+                  "as_of": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Optional as-of date (YYYY-MM-DD). Defaults to today."
+                  },
+                  "refresh": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Force price/dividend refresh on first run (default: true)."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Refresh summary per plaid account.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "as_of": {
+                      "type": "string",
+                      "format": "date"
+                    },
+                    "refresh": {
+                      "type": "boolean"
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "total_sec": {
+                      "type": "number"
+                    },
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "plaid_account_id": {
+                            "type": "integer"
+                          },
+                          "elapsed_sec": {
+                            "type": "number"
+                          },
+                          "served_from": {
+                            "type": "string"
+                          },
+                          "cache_origin": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "holdings": {
+                            "type": "integer",
+                            "nullable": true
+                          },
+                          "market_value": {
+                            "type": "number",
+                            "nullable": true
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "error": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        }
+                      }
                     }
                   }
                 }
