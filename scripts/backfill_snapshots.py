@@ -14,9 +14,14 @@ import os
 import sys
 from datetime import date, timedelta
 
-from app.api.routes.holdings import get_valued_holdings_for_plaid_account
-from app.infra.db import SessionLocal
-from app.infra.models import LMTransaction
+# Ensure repo root on sys.path before importing app.*
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from app.api.routes.holdings import get_valued_holdings_for_plaid_account  # noqa: E402
+from app.infra.db import SessionLocal  # noqa: E402
+from app.infra.models import LMTransaction  # noqa: E402
 
 
 def _daterange(start: date, end: date):
@@ -86,8 +91,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # ensure repo root on sys.path if invoked directly
-    ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if ROOT not in sys.path:
-        sys.path.insert(0, ROOT)
     sys.exit(main())
