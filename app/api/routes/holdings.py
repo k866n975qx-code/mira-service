@@ -912,47 +912,49 @@ def get_valued_holdings_for_plaid_account(
                 h["weight_pct"] = None
 
     # --- margin loan info (from Lunch Money plaid accounts) ---
+    # Only include margin balance for "today"; for historical dates we skip to avoid leaking current balance.
     margin_loan_balance: Optional[float] = None
     margin_to_portfolio_pct: Optional[float] = None
 
-    try:
-        lm_client = LunchMoneyClient()
-        plaid_accounts = lm_client.get_plaid_accounts()
+    if as_of == date.today():
+        try:
+            lm_client = LunchMoneyClient()
+            plaid_accounts = lm_client.get_plaid_accounts()
 
-        # find the M1 Borrow / loan account
-        loan_acct = None
-        for acct in plaid_accounts:
-            if (
-                acct.get("type") == "loan"
-                and acct.get("institution_name") == "M1 Finance"
-            ):
-                loan_acct = acct
-                break
+            # find the M1 Borrow / loan account
+            loan_acct = None
+            for acct in plaid_accounts:
+                if (
+                    acct.get("type") == "loan"
+                    and acct.get("institution_name") == "M1 Finance"
+                ):
+                    loan_acct = acct
+                    break
 
-        if loan_acct:
-            raw_balance = loan_acct.get("balance")
-            margin_loan_balance = (
-                float(raw_balance) if raw_balance is not None else None
-            )
-
-            # portfolio value from snapshot result; fallback to recompute if missing
-            portfolio_value = float(result.get("total_market_value") or 0.0)
-            if portfolio_value <= 0:
-                portfolio_value = 0.0
-                for h in holdings:
-                    mv = h.get("market_value")
-                    if isinstance(mv, (int, float)):
-                        portfolio_value += mv
-
-            if margin_loan_balance is not None and portfolio_value > 0:
-                margin_to_portfolio_pct = round(
-                    abs(margin_loan_balance) / portfolio_value * 100.0, 3
+            if loan_acct:
+                raw_balance = loan_acct.get("balance")
+                margin_loan_balance = (
+                    float(raw_balance) if raw_balance is not None else None
                 )
 
-    except Exception:
-        # don't blow up snapshot if LM is flaky
-        margin_loan_balance = None
-        margin_to_portfolio_pct = None
+                # portfolio value from snapshot result; fallback to recompute if missing
+                portfolio_value = float(result.get("total_market_value") or 0.0)
+                if portfolio_value <= 0:
+                    portfolio_value = 0.0
+                    for h in holdings:
+                        mv = h.get("market_value")
+                        if isinstance(mv, (int, float)):
+                            portfolio_value += mv
+
+                if margin_loan_balance is not None and portfolio_value > 0:
+                    margin_to_portfolio_pct = round(
+                        abs(margin_loan_balance) / portfolio_value * 100.0, 3
+                    )
+
+        except Exception:
+            # don't blow up snapshot if LM is flaky
+            margin_loan_balance = None
+            margin_to_portfolio_pct = None
 
     result["margin_loan_balance"] = margin_loan_balance
     result["margin_to_portfolio_pct"] = margin_to_portfolio_pct
