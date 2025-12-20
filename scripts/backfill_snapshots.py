@@ -49,6 +49,13 @@ def main() -> int:
         action="store_true",
         help="If set, do not force refresh (will reuse caches); default is to refresh.",
     )
+    parser.add_argument(
+        "--no-enrich",
+        dest="enrich",
+        action="store_false",
+        help="Disable enrichment/perf during backfill (default is on for full snapshots).",
+    )
+    parser.set_defaults(enrich=True)
     args = parser.parse_args()
 
     with SessionLocal() as db:
@@ -68,7 +75,7 @@ def main() -> int:
 
         end_date = date.fromisoformat(args.end) if args.end else date.today()
 
-        print(f"[backfill] plaid_account_id={args.plaid_account_id} start={start_date} end={end_date} refresh={not args.skip_refresh}")
+        print(f"[backfill] plaid_account_id={args.plaid_account_id} start={start_date} end={end_date} refresh={not args.skip_refresh} enrich={args.enrich}")
         count = 0
         for d in _daterange(start_date, end_date):
             try:
@@ -77,6 +84,15 @@ def main() -> int:
                     as_of=d,
                     refresh=not args.skip_refresh,
                     slim=True,
+                    goal_monthly=2000.0,
+                    symbols=None,
+                    apr_current_pct=None,
+                    apr_future_pct=None,
+                    apr_future_date=None,
+                    margin_mode=None,
+                    enrich=bool(args.enrich),
+                    perf=bool(args.enrich),
+                    perf_method="accurate" if args.enrich else "approx",
                     db=db,
                 )
                 count += 1
