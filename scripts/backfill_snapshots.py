@@ -79,6 +79,7 @@ def main() -> int:
         total_days = (end_date - start_date).days + 1
         print(f"[backfill] plaid_account_id={args.plaid_account_id} start={start_date} end={end_date} days={total_days} refresh={not args.skip_refresh} enrich={args.enrich}")
         count = 0
+        overall_start = time.perf_counter()
         for d in _daterange(start_date, end_date):
             started_at = time.perf_counter()
             try:
@@ -100,10 +101,15 @@ def main() -> int:
                 )
                 count += 1
                 elapsed = time.perf_counter() - started_at
-                print(f"  ✓ {d} ({count}/{total_days}) in {elapsed:.1f}s")
+                avg = (time.perf_counter() - overall_start) / count if count else 0
+                remaining = total_days - count
+                eta_sec = remaining * avg
+                print(f"  ✓ {d} ({count}/{total_days}) in {elapsed:.1f}s | eta ~{eta_sec/60:.1f}m")
             except Exception as e:
                 print(f"  failed for {d}: {e}")
                 continue
+            finally:
+                sys.stdout.flush()
 
         print(f"[backfill] completed: {count} snapshots persisted.")
     return 0
