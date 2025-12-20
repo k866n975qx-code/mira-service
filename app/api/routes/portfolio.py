@@ -114,8 +114,9 @@ class CompareRequest(BaseModel):
     snapshot_a_date: str
     snapshot_b_date: str
     normalize_by: Optional[str] = "market_value"
-    include_snapshots: bool = True
+    include_snapshots: bool = False
     compare_all: bool = True
+    slim: bool = True
 
 
 def _safe_get(obj: Dict[str, Any], path: str) -> Optional[float]:
@@ -315,6 +316,9 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
     }
     checksum = hashlib.sha256(json.dumps(checksum_src, sort_keys=True).encode()).hexdigest()
 
+    snap_a_out = snap_a if not payload.slim else _slim_snapshot(snap_a)
+    snap_b_out = snap_b if not payload.slim else _slim_snapshot(snap_b)
+
     response: Dict[str, Any] = {
         "meta": {
             "snapshot_a_date": payload.snapshot_a_date,
@@ -341,9 +345,10 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
             "comparison_checksum": f"sha256:{checksum}",
             "sample_output_verified": True,
         },
-        "snapshot_a": snap_a,
-        "snapshot_b": snap_b,
     }
+    if payload.include_snapshots:
+        response["snapshot_a"] = snap_a_out
+        response["snapshot_b"] = snap_b_out
 
     try:
         compare_dir = os.path.join(SNAPSHOT_DIR, "..", "comparisons")
