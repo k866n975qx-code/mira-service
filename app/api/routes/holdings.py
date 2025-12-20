@@ -829,9 +829,12 @@ def get_valued_holdings_for_plaid_account(
     except Exception:
         # If LM is unreachable, proceed without the check (best-effort), holdings logic will still work from DB
         pass
+    # Only include transactions up to the as_of date so backfills/time-travel are correct.
     txs = (
         db.query(LMTransaction)
         .filter(LMTransaction.plaid_account_id == plaid_account_id)
+        .filter(LMTransaction.date <= as_of)
+        .order_by(LMTransaction.date.asc())
         .all()
     )
 

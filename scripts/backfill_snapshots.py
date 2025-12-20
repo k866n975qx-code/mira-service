@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from datetime import date, timedelta
 
 # Ensure repo root on sys.path before importing app.*
@@ -75,9 +76,11 @@ def main() -> int:
 
         end_date = date.fromisoformat(args.end) if args.end else date.today()
 
-        print(f"[backfill] plaid_account_id={args.plaid_account_id} start={start_date} end={end_date} refresh={not args.skip_refresh} enrich={args.enrich}")
+        total_days = (end_date - start_date).days + 1
+        print(f"[backfill] plaid_account_id={args.plaid_account_id} start={start_date} end={end_date} days={total_days} refresh={not args.skip_refresh} enrich={args.enrich}")
         count = 0
         for d in _daterange(start_date, end_date):
+            started_at = time.perf_counter()
             try:
                 get_valued_holdings_for_plaid_account(
                     plaid_account_id=args.plaid_account_id,
@@ -96,8 +99,8 @@ def main() -> int:
                     db=db,
                 )
                 count += 1
-                if count % 10 == 0:
-                    print(f"  processed {count} days through {d}")
+                elapsed = time.perf_counter() - started_at
+                print(f"  ✓ {d} ({count}/{total_days}) in {elapsed:.1f}s")
             except Exception as e:
                 print(f"  failed for {d}: {e}")
                 continue
