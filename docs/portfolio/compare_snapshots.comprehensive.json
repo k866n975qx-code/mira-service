@@ -1,0 +1,111 @@
+{
+  "meta": {
+    "snapshot_a_date": "2025-12-01",
+    "snapshot_b_date": "2025-12-19",
+    "account_id": 317631,
+    "compression": "gzip",
+    "compare_all": true,
+    "original_snapshots_saved": true,
+    "status": "ok"
+  },
+  "summary": {
+    "market_value_change_pct": 0.56,
+    "yield_change_pct": 0.31,
+    "income_change_pct": 1.24,
+    "volatility_change_pct": 0.44,
+    "max_drawdown_change": -0.4,
+    "sharpe_change": 0.02,
+    "beta_shift": 0.01
+  },
+  "composition": {
+    "added": [
+      { "symbol": "BXSL", "weight_b_pct": 4.0, "current_yield_pct": 10.2 }
+    ],
+    "removed": [
+      { "symbol": "MAIN", "weight_a_pct": 2.0, "yield_on_cost_pct": 8.1 }
+    ],
+    "total_holdings_a": 12,
+    "total_holdings_b": 13,
+    "unchanged_count": 9
+  },
+  "holdings_diff": [
+    {
+      "symbol": "SVOL",
+      "weight_a_pct": 15.9,
+      "weight_b_pct": 16.2,
+      "weight_change_pct": 0.3,
+      "market_value_a": 2505.2,
+      "market_value_b": 2565.5,
+      "market_value_change_pct": 2.4,
+      "current_yield_a": 18.9,
+      "current_yield_b": 19.3,
+      "yield_change_pct": 0.4,
+      "forward_income_change": 9.1,
+      "beta_change": 0.02
+    },
+    {
+      "symbol": "ARCC",
+      "weight_a_pct": 8.7,
+      "weight_b_pct": 8.9,
+      "weight_change_pct": 0.2,
+      "market_value_change_pct": 2.0,
+      "current_yield_a": 9.5,
+      "current_yield_b": 9.6
+    }
+  ],
+  "income_comparison": {
+    "forward_12m_a": 2034.5,
+    "forward_12m_b": 2059.7,
+    "projected_monthly_income_a": 168.1,
+    "projected_monthly_income_b": 171.6,
+    "income_growth_pct": 2.1,
+    "yield_on_cost_delta": 0.08
+  },
+  "risk_comparison": {
+    "vol_30d_a_pct": 12.7,
+    "vol_30d_b_pct": 12.9,
+    "max_drawdown_a_pct": -21.5,
+    "max_drawdown_b_pct": -21.1,
+    "sharpe_a": 0.47,
+    "sharpe_b": 0.49,
+    "beta_a": 0.84,
+    "beta_b": 0.85
+  },
+  "macro_comparison": {
+    "vix_a": 16.1,
+    "vix_b": 15.3,
+    "ten_year_yield_a": 4.35,
+    "ten_year_yield_b": 4.26,
+    "macro_stress_delta": -0.09
+  },
+  "margin_analysis": {
+    "ltv_a_pct": 45.8,
+    "ltv_b_pct": 45.3,
+    "income_interest_coverage_a": 5.7,
+    "income_interest_coverage_b": 5.8,
+    "effective_leverage_change_pct": -0.5
+  },
+  "top_movers": {
+    "weight_increase": [
+      { "symbol": "SVOL", "delta_pct": 0.3 },
+      { "symbol": "ARCC", "delta_pct": 0.2 }
+    ],
+    "weight_decrease": [
+      { "symbol": "TRIN", "delta_pct": -0.5 }
+    ],
+    "highest_yield_gain": [
+      { "symbol": "JEPI", "yield_delta_pct": 0.5 }
+    ],
+    "largest_yield_drop": [
+      { "symbol": "FSK", "yield_delta_pct": -0.9 }
+    ]
+  },
+  "validation": {
+    "task": "portfolio_comparison",
+    "status": "complete",
+    "snapshot_a_stored": true,
+    "snapshot_b_stored": true,
+    "comparison_checksum": "sha256:e4c5a6bdeff012ff",
+    "sample_output_verified": true
+  }
+}

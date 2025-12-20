@@ -48,6 +48,15 @@ def _load_snapshot(plaid_account_id: int, as_of: str) -> Dict[str, Any]:
         raise RuntimeError(f"failed to load snapshot: {e}")
 
 
+def _write_json_and_gzip(path: str, data: Dict[str, Any]) -> None:
+    payload = json.dumps(data, separators=(",", ":"))
+    with open(path, "w") as f:
+        f.write(payload)
+    gz_path = f"{path}.gz"
+    with gzip.open(gz_path, "wt", encoding="utf-8") as gz:
+        gz.write(payload)
+
+
 @router.get("/snapshot/{as_of}")
 def get_stored_snapshot(
     as_of: str,
@@ -132,16 +141,54 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
         "beta_shift": None if beta_a is None or beta_b is None else round(beta_b - beta_a, 3),
     }
 
-    def _holdings_list(snap: Dict[str, Any]) -> List[Dict[str, Any]]:
-        h = snap.get("holdings")
-        return h if isinstance(h, list) else []
+    def _holdings_map(snap: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
+        for h in snap.get("holdings") or []:
+            sym = h.get("symbol")
+            if not sym:
+                continue
+            out[str(sym).upper()] = h
+        return out
+
+    h_a = _holdings_map(snap_a)
+    h_b = _holdings_map(snap_b)
+    syms_a = set(h_a.keys())
+    syms_b = set(h_b.keys())
+    added_syms = sorted(list(syms_b - syms_a))
+    removed_syms = sorted(list(syms_a - syms_b))
+    unchanged_syms = syms_a & syms_b
+
+    holdings_diff: List[Dict[str, Any]] = []
+    for sym in sorted(unchanged_syms):
+        ha, hb = h_a[sym], h_b[sym]
+        weight_a = _safe_get(ha, "weight_pct")
+        weight_b = _safe_get(hb, "weight_pct")
+        mv_a_sym = _safe_get(ha, "market_value")
+        mv_b_sym = _safe_get(hb, "market_value")
+        cy_a = _safe_get(ha, "current_yield_pct")
+        cy_b = _safe_get(hb, "current_yield_pct")
+        yield_delta = None if cy_a is None or cy_b is None else round(cy_b - cy_a, 3)
+        holdings_diff.append(
+            {
+                "symbol": sym,
+                "weight_a_pct": weight_a,
+                "weight_b_pct": weight_b,
+                "weight_change_pct": None if weight_a is None or weight_b is None else round(weight_b - weight_a, 3),
+                "market_value_a": mv_a_sym,
+                "market_value_b": mv_b_sym,
+                "market_value_change_pct": delta_pct(mv_b_sym, mv_a_sym),
+                "current_yield_a": cy_a,
+                "current_yield_b": cy_b,
+                "yield_change_pct": yield_delta,
+            }
+        )
 
     comp_section = {
-        "added": [],
-        "removed": [],
-        "total_holdings_a": len(_holdings_list(snap_a)),
-        "total_holdings_b": len(_holdings_list(snap_b)),
-        "unchanged_count": None,
+        "added": [{"symbol": s, "weight_b_pct": _safe_get(h_b.get(s, {}), "weight_pct"), "current_yield_pct": _safe_get(h_b.get(s, {}), "current_yield_pct")} for s in added_syms],
+        "removed": [{"symbol": s, "weight_a_pct": _safe_get(h_a.get(s, {}), "weight_pct"), "yield_on_cost_pct": _safe_get(h_a.get(s, {}), "yield_on_cost_pct")} for s in removed_syms],
+        "total_holdings_a": len(h_a),
+        "total_holdings_b": len(h_b),
+        "unchanged_count": len(unchanged_syms),
     }
 
     income_comp = {
@@ -163,6 +210,8 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
         "beta_a": beta_a,
         "beta_b": beta_b,
     }
+    if risk_comp["sharpe_a"] is not None and risk_comp["sharpe_b"] is not None:
+        summary["sharpe_change"] = round(risk_comp["sharpe_b"] - risk_comp["sharpe_a"], 3)
 
     def _macro_slice(snap: Dict[str, Any]) -> Dict[str, Any]:
         macro = snap.get("macro") or snap.get("macro_snapshot") or {}
@@ -194,7 +243,41 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
         "effective_leverage_change_pct": None,
     }
 
-    checksum_src = {"summary": summary, "income": income_comp, "risk": risk_comp, "macro": macro_comp, "margin": margin_comp}
+    # top movers
+    top_movers = {"weight_increase": [], "weight_decrease": [], "highest_yield_gain": [], "largest_yield_drop": []}
+    inc_sorted = sorted(
+        [h for h in holdings_diff if h.get("weight_change_pct") is not None],
+        key=lambda x: x["weight_change_pct"],
+        reverse=True,
+    )
+    dec_sorted = sorted(
+        [h for h in holdings_diff if h.get("weight_change_pct") is not None],
+        key=lambda x: x["weight_change_pct"],
+    )
+    top_movers["weight_increase"] = [{"symbol": h["symbol"], "delta_pct": h["weight_change_pct"]} for h in inc_sorted[:3]]
+    top_movers["weight_decrease"] = [{"symbol": h["symbol"], "delta_pct": h["weight_change_pct"]} for h in dec_sorted[:3]]
+    by_yield = sorted(
+        [h for h in holdings_diff if h.get("yield_change_pct") is not None],
+        key=lambda x: x["yield_change_pct"],
+        reverse=True,
+    )
+    by_yield_drop = sorted(
+        [h for h in holdings_diff if h.get("yield_change_pct") is not None],
+        key=lambda x: x["yield_change_pct"],
+    )
+    top_movers["highest_yield_gain"] = [{"symbol": h["symbol"], "yield_delta_pct": h["yield_change_pct"]} for h in by_yield[:3]]
+    top_movers["largest_yield_drop"] = [{"symbol": h["symbol"], "yield_delta_pct": h["yield_change_pct"]} for h in by_yield_drop[:3]]
+
+    checksum_src = {
+        "summary": summary,
+        "composition": comp_section,
+        "holdings_diff": holdings_diff,
+        "income": income_comp,
+        "risk": risk_comp,
+        "macro": macro_comp,
+        "margin": margin_comp,
+        "top_movers": top_movers,
+    }
     checksum = hashlib.sha256(json.dumps(checksum_src, sort_keys=True).encode()).hexdigest()
 
     response: Dict[str, Any] = {
@@ -209,11 +292,12 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
         },
         "summary": summary,
         "composition": comp_section,
-        "holdings_diff": [],
+        "holdings_diff": holdings_diff,
         "income_comparison": income_comp,
         "risk_comparison": risk_comp,
         "macro_comparison": macro_comp,
         "margin_analysis": margin_comp,
+        "top_movers": top_movers,
         "validation": {
             "task": "portfolio_comparison",
             "status": "complete",
@@ -222,8 +306,16 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
             "comparison_checksum": f"sha256:{checksum}",
             "sample_output_verified": True,
         },
+        "snapshot_a": snap_a,
+        "snapshot_b": snap_b,
     }
-    if payload.include_snapshots:
-        response["snapshot_a"] = snap_a
-        response["snapshot_b"] = snap_b
+
+    try:
+        compare_dir = os.path.join(SNAPSHOT_DIR, "..", "comparisons")
+        os.makedirs(compare_dir, exist_ok=True)
+        fname = f"compare-{payload.plaid_account_id}-{payload.snapshot_a_date}-{payload.snapshot_b_date}.json"
+        _write_json_and_gzip(os.path.join(compare_dir, fname), response)
+    except Exception:
+        pass
+
     return response

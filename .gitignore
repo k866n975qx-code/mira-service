@@ -8,3 +8,8 @@ __pycache__/
 .ruff_cache/
 .snapshot_cache/
 .DS_Store
+output.json
+macro_preview.json
+docs/macro/
+docs/portfolio/snapshots/
+docs/portfolio/comparisons/

@@ -634,99 +634,93 @@
         }
       }
     },
-    "/lm/holdings/refresh": {
-      "post": {
-        "operationId": "refreshHoldingsSnapshots",
+    "/api/v1/portfolio/snapshot/{as_of}": {
+      "get": {
+        "operationId": "getStoredPortfolioSnapshot",
         "tags": [
-          "holdings"
+          "portfolio"
         ],
-        "summary": "Recompute holdings snapshots for one or more plaid accounts",
+        "summary": "Get stored portfolio snapshot by date and plaid_account_id",
+        "parameters": [
+          {
+            "name": "as_of",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "Snapshot date (YYYY-MM-DD) used in filename."
+          },
+          {
+            "name": "plaid_account_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Plaid account id used when snapshot was persisted."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored snapshot JSON.",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "404": {
+            "description": "Snapshot not found."
+          }
+        }
+      }
+    },
+    "/api/v1/portfolio/compare_snapshots": {
+      "post": {
+        "operationId": "compareStoredSnapshots",
+        "tags": [
+          "portfolio"
+        ],
+        "summary": "Compare two stored snapshots by date/account and return a comprehensive diff",
         "requestBody": {
-          "required": false,
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
                 "properties": {
-                  "plaid_account_ids": {
-                    "type": "array",
-                    "items": {
-                      "type": "integer"
-                    },
-                    "description": "Optional list of plaid_account_ids; if omitted, auto-discovers M1 investment accounts."
-                  },
-                  "as_of": {
-                    "type": "string",
-                    "format": "date",
-                    "description": "Optional as-of date (YYYY-MM-DD). Defaults to today."
-                  },
-                  "refresh": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "Force price/dividend refresh on first run (default: true)."
-                  }
-                }
+                  "plaid_account_id": { "type": "integer" },
+                  "snapshot_a_date": { "type": "string", "format": "date" },
+                  "snapshot_b_date": { "type": "string", "format": "date" },
+                  "normalize_by": { "type": "string", "nullable": true },
+                  "include_snapshots": { "type": "boolean", "default": true },
+                  "compare_all": { "type": "boolean", "default": true }
+                },
+                "required": ["plaid_account_id", "snapshot_a_date", "snapshot_b_date"]
               }
             }
           }
         },
         "responses": {
           "200": {
-            "description": "Refresh summary per plaid account.",
+            "description": "Comparison result matching compare_snapshots.comprehensive.json",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "as_of": {
-                      "type": "string",
-                      "format": "date"
-                    },
-                    "refresh": {
-                      "type": "boolean"
-                    },
-                    "count": {
-                      "type": "integer"
-                    },
-                    "total_sec": {
-                      "type": "number"
-                    },
-                    "results": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "plaid_account_id": {
-                            "type": "integer"
-                          },
-                          "elapsed_sec": {
-                            "type": "number"
-                          },
-                          "served_from": {
-                            "type": "string"
-                          },
-                          "cache_origin": {
-                            "type": "string",
-                            "nullable": true
-                          },
-                          "holdings": {
-                            "type": "integer",
-                            "nullable": true
-                          },
-                          "market_value": {
-                            "type": "number",
-                            "nullable": true
-                          },
-                          "status": {
-                            "type": "string"
-                          },
-                          "error": {
-                            "type": "string",
-                            "nullable": true
-                          }
-                        }
-                      }
-                    }
+                    "meta": { "type": "object" },
+                    "summary": { "type": "object" },
+                    "composition": { "type": "object" },
+                    "holdings_diff": { "type": "array" },
+                    "income_comparison": { "type": "object" },
+                    "risk_comparison": { "type": "object" },
+                    "macro_comparison": { "type": "object" },
+                    "margin_analysis": { "type": "object" },
+                    "top_movers": { "type": "object" },
+                    "validation": { "type": "object" },
+                    "snapshot_a": { "type": "object" },
+                    "snapshot_b": { "type": "object" }
                   }
                 }
               }

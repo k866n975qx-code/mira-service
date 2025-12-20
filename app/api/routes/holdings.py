@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import json
+import os
+import gzip
 import time
 from datetime import date, datetime, timedelta, timezone
 from math import ceil, log
@@ -36,6 +39,7 @@ from app.services.dividends import (
     estimate_forward_dividends_for_holdings,
     _yf_cache_ttl_seconds,
 )
+from app.services.macro import get_macro_package
 
 
 # Cache snapshots for 6 hours to reduce rebuild frequency while keeping data reasonably fresh.
@@ -505,11 +509,68 @@ def get_valued_holdings_for_plaid_account(
         holdings = data.get("holdings") or []
         for h in holdings:
             h.pop("ultimate_provenance", None)
+        macro_block = data.get("macro")
+        if isinstance(macro_block, dict):
+            macro_block.pop("provenance", None)
+            snap = macro_block.get("snapshot")
+            if isinstance(snap, dict):
+                snap.pop("meta", None)
+            hist = macro_block.get("history")
+            if isinstance(hist, dict):
+                hist.pop("meta", None)
+            trends = macro_block.get("trends")
+            if isinstance(trends, dict):
+                trends.pop("meta", None)
         data = _round_numbers(data)
         return data
 
     def _maybe_slim(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         return _slim_snapshot(snapshot) if slim else snapshot
+
+    def _attach_macro_block(payload: Dict[str, Any], refresh_flag: bool = False) -> None:
+        """Best-effort macro attachment; non-blocking."""
+        try:
+            macro = get_macro_package(force_refresh=bool(refresh_flag))
+            snap = macro.get("snapshot") if isinstance(macro, dict) else None
+            if isinstance(snap, dict) and snap.get("date"):
+                prov = None
+                if isinstance(snap.get("meta"), dict):
+                    sm = snap["meta"]
+                    prov = {
+                        "source": sm.get("source"),
+                        "fetched_at": sm.get("fetched_at"),
+                        "schema_version": sm.get("schema_version"),
+                    }
+                payload["macro"] = {
+                    "snapshot": snap,
+                    "trends": macro.get("trends"),
+                    "history": macro.get("history"),
+                    "provenance": prov,
+                }
+        except Exception:
+            pass
+
+    def _persist_snapshot_file(payload: Dict[str, Any], as_of_date: date, pid: int) -> None:
+        """Write snapshot to disk (json + gzip) for comparisons; best-effort."""
+        try:
+            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "docs", "portfolio", "snapshots"))
+            os.makedirs(base_dir, exist_ok=True)
+            fname = f"snapshot-{pid}-{as_of_date.isoformat()}.json"
+            path = os.path.join(base_dir, fname)
+            # ensure only one per day: replace any existing file for that date
+            for ext in ("", ".gz"):
+                try:
+                    os.remove(path + ext)
+                except OSError:
+                    pass
+            # write minified json
+            with open(path, "w") as f:
+                json.dump(payload, f, separators=(",", ":"))
+            gz_path = f"{path}.gz"
+            with gzip.open(gz_path, "wt", encoding="utf-8") as gz:
+                json.dump(payload, gz, separators=(",", ":"))
+        except Exception:
+            pass
 
     # --- Fast path: return latest cached snapshot unless refresh requested ---
     if not refresh:
@@ -673,12 +734,22 @@ def get_valued_holdings_for_plaid_account(
             cache_key = compute_cache_key(payload)
             cached_snapshot = load_snapshot(cache_key)
             if cached_snapshot:
+                _attach_macro_block(cached_snapshot, refresh_flag=False)
+                try:
+                    _persist_snapshot_file(cached_snapshot, as_of_cached, plaid_account_id)
+                except Exception:
+                    pass
                 return _maybe_slim(cached_snapshot)
 
             normalized_payload = normalize_snapshot(payload)
             validate_snapshot(normalized_payload, raise_on_error=True)
             normalized_payload["cached"] = True
+            _attach_macro_block(normalized_payload, refresh_flag=False)
             cache_snapshot(cache_key, normalized_payload, ttl=SNAPSHOT_CACHE_TTL_SECONDS)
+            try:
+                _persist_snapshot_file(normalized_payload, as_of_cached, plaid_account_id)
+            except Exception:
+                pass
             return _maybe_slim(normalized_payload)
 
     as_of = as_of or date.today()
@@ -1133,6 +1204,9 @@ def get_valued_holdings_for_plaid_account(
     # Attach goal progress & margin guidance before normalizing/caching
     _inject_goal_progress(result, as_of)
     _inject_margin_guidance(result, as_of)
+
+    _attach_macro_block(result, refresh_flag=bool(refresh))
+
     for h in result.get("holdings", []):
         h.pop("trend", None)
 
@@ -1140,6 +1214,10 @@ def get_valued_holdings_for_plaid_account(
     final_snapshot = build_and_cache_snapshot(
         result, key=cache_key, ttl=SNAPSHOT_CACHE_TTL_SECONDS
     )
+    try:
+        _persist_snapshot_file(final_snapshot, as_of, plaid_account_id)
+    except Exception:
+        pass
 
     # --- persist snapshot for time-travel / history ---
     try:
