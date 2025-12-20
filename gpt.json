@@ -704,8 +704,9 @@
                   "snapshot_a_date": { "type": "string", "format": "date" },
                   "snapshot_b_date": { "type": "string", "format": "date" },
                   "normalize_by": { "type": "string", "nullable": true },
-                  "include_snapshots": { "type": "boolean", "default": true },
-                  "compare_all": { "type": "boolean", "default": true }
+                  "include_snapshots": { "type": "boolean", "default": false },
+                  "compare_all": { "type": "boolean", "default": true },
+                  "slim": { "type": "boolean", "default": true }
                 },
                 "required": ["plaid_account_id", "snapshot_a_date", "snapshot_b_date"]
               }
