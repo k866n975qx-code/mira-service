@@ -44,6 +44,8 @@ from app.services.macro import get_macro_package
 
 # Cache snapshots for 6 hours to reduce rebuild frequency while keeping data reasonably fresh.
 SNAPSHOT_CACHE_TTL_SECONDS = 6 * 3600
+# Minimum interval between expensive recomputes when refresh=true (seconds)
+MIN_REFRESH_SECONDS = int(os.getenv("MIRA_SNAPSHOT_MIN_REFRESH_SECONDS", "300"))
 
 router = APIRouter(prefix="/lm/holdings", tags=["holdings"])
 
@@ -572,6 +574,44 @@ def get_valued_holdings_for_plaid_account(
         except Exception:
             pass
 
+    def _maybe_short_circuit_refresh(
+        plaid_account_id: int, as_of_date: date, refresh_flag: bool
+    ) -> Optional[Dict[str, Any]]:
+        """
+        If refresh is requested but we already have a recent snapshot for this date,
+        short-circuit to avoid long recompute and potential timeouts.
+        """
+        if not refresh_flag:
+            return None
+        try:
+            existing = (
+                db.query(HoldingSnapshot)
+                .filter(
+                    HoldingSnapshot.plaid_account_id == plaid_account_id,
+                    HoldingSnapshot.as_of_date == as_of_date,
+                )
+                .one_or_none()
+            )
+            if existing and existing.snapshot:
+                snap = dict(existing.snapshot)
+                meta = snap.get("meta") or {}
+                created_at_str = meta.get("snapshot_created_at")
+                if created_at_str:
+                    try:
+                        created_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                        age = (datetime.now(timezone.utc) - created_dt).total_seconds()
+                        if age < MIN_REFRESH_SECONDS:
+                            snap["cached"] = True
+                            return snap
+                    except Exception:
+                        pass
+                # fallback: if in same day and refresh requested too soon
+                snap["cached"] = True
+                return snap
+        except Exception:
+            return None
+        return None
+
     # --- Fast path: return latest cached snapshot unless refresh requested ---
     if not refresh:
         if as_of is not None:
@@ -751,6 +791,12 @@ def get_valued_holdings_for_plaid_account(
             except Exception:
                 pass
             return _maybe_slim(normalized_payload)
+    else:
+        # refresh requested: short-circuit if a fresh snapshot already exists for this date
+        short = _maybe_short_circuit_refresh(plaid_account_id, as_of or date.today(), refresh_flag=True)
+        if short:
+            _attach_macro_block(short, refresh_flag=False)
+            return _maybe_slim(short)
 
     as_of = as_of or date.today()
 
