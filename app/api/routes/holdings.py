@@ -605,9 +605,7 @@ def get_valued_holdings_for_plaid_account(
                             return snap
                     except Exception:
                         pass
-                # fallback: if in same day and refresh requested too soon
-                snap["cached"] = True
-                return snap
+                # otherwise allow rebuild
         except Exception:
             return None
         return None
