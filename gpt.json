@@ -88,7 +88,7 @@
             "schema": {
               "type": "integer"
             },
-            "description": "Plaid account ID (M1 brokerage is 317631 unless otherwise specified)."
+            "description": "Plaid account ID (defaults to 317631 for M1 brokerage)."
           },
           {
             "name": "as_of",
@@ -208,7 +208,7 @@
             "required": false,
             "schema": {
               "type": "boolean",
-              "default": false
+              "default": true
             },
             "description": "Return a compact snapshot (drop provenance/notes, round decimals)."
           }
@@ -655,11 +655,22 @@
           {
             "name": "plaid_account_id",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": "integer"
+              "type": "integer",
+              "default": 317631
             },
-            "description": "Plaid account id used when snapshot was persisted."
+            "description": "Plaid account id used when snapshot was persisted (defaults to 317631)."
+          },
+          {
+            "name": "slim",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "description": "Return a compact snapshot (drop provenance/notes, round decimals). Defaults true."
           }
         ],
         "responses": {

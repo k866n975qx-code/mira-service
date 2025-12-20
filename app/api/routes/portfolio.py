@@ -57,10 +57,43 @@ def _write_json_and_gzip(path: str, data: Dict[str, Any]) -> None:
         gz.write(payload)
 
 
+def _round_numbers(obj: Any) -> Any:
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, (float, int)):
+        return round(float(obj), 3)
+    if isinstance(obj, dict):
+        return {k: _round_numbers(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_round_numbers(v) for v in obj]
+    return obj
+
+
+def _slim_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    data = json.loads(json.dumps(snapshot))
+    holdings = data.get("holdings") or []
+    for h in holdings:
+        h.pop("ultimate_provenance", None)
+    macro_block = data.get("macro")
+    if isinstance(macro_block, dict):
+        macro_block.pop("provenance", None)
+        snap = macro_block.get("snapshot")
+        if isinstance(snap, dict):
+            snap.pop("meta", None)
+        hist = macro_block.get("history")
+        if isinstance(hist, dict):
+            hist.pop("meta", None)
+        trends = macro_block.get("trends")
+        if isinstance(trends, dict):
+            trends.pop("meta", None)
+    return _round_numbers(data)
+
+
 @router.get("/snapshot/{as_of}")
 def get_stored_snapshot(
     as_of: str,
-    plaid_account_id: int = Query(..., description="Plaid account id used in snapshot filename."),
+    plaid_account_id: int = Query(317631, description="Plaid account id used in snapshot filename."),
+    slim: bool = Query(True, description="Return a compact snapshot (drop provenance, condense holdings metadata)."),
 ) -> Dict[str, Any]:
     """
     Return a stored snapshot from docs/portfolio/snapshots (persisted by /lm/holdings).
@@ -71,6 +104,8 @@ def get_stored_snapshot(
         raise HTTPException(status_code=404, detail="Snapshot not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    if slim:
+        snap = _slim_snapshot(snap)
     return snap
 
 

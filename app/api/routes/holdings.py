@@ -188,7 +188,7 @@ def get_valued_holdings_for_plaid_account(
     perf: Optional[bool] = Query(True, description="Attach portfolio-level performance and risk rollups"),
     perf_method: Optional[str] = Query("accurate", description="Performance method: accurate|approx (default accurate)"),
     slim: bool = Query(
-        False,
+        True,
         description="Return a compact snapshot (drop provenance, condense holdings metadata, round decimals).",
     ),
     db: Session = Depends(get_db),
