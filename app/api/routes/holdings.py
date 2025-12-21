@@ -896,6 +896,9 @@ def get_valued_holdings_for_plaid_account(
             return _maybe_slim(short)
 
     as_of = as_of or date.today()
+    today = date.today()
+    if as_of > today:
+        raise HTTPException(status_code=400, detail="as_of cannot be in the future")
 
     # Validate that this plaid_account_id is an M1 investment account
     try:
@@ -1468,6 +1471,9 @@ def refresh_snapshots(payload: RefreshSnapshotsRequest, db: Session = Depends(ge
     """
     as_of = payload.as_of or date.today()
     refresh_flag = bool(payload.refresh)
+    today = date.today()
+    if as_of > today:
+        raise HTTPException(status_code=400, detail="as_of cannot be in the future")
 
     try:
         client = LunchMoneyClient()

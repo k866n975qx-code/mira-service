@@ -195,7 +195,8 @@ def load_daily_snapshots(n: int = MIN_DAYS):
             return None
 
     dated = [(f, _parse_date(f)) for f in files]
-    dated = [(f, d) for f, d in dated if d is not None]
+    today = date.today()
+    dated = [(f, d) for f, d in dated if d is not None and d <= today]
     dated.sort(key=lambda x: x[1])
     latest = dated[-n:]
     snapshots = []
