@@ -204,3 +204,33 @@ def get_price_history(symbols: List[str], start: date, end: date) -> Dict[str, D
         result[sym] = daily_prices
 
     return result
+
+
+def get_prices_as_of(symbols: List[str], as_of_date: date) -> Dict[str, float]:
+    """
+    Fetch closing prices on or before as_of_date (best-effort) using yfinance history.
+    """
+    prices: Dict[str, float] = {}
+    if not symbols:
+        return prices
+    end_dt = as_of_date + timedelta(days=1)
+    for sym in symbols:
+        try:
+            hist = yf.download(
+                sym,
+                start=None,
+                end=end_dt.isoformat(),
+                progress=False,
+                auto_adjust=False,
+                threads=False,
+            )
+            if hist is None or hist.empty:
+                continue
+            series = pd.to_numeric(hist["Close"], errors="coerce").dropna()
+            if series.empty:
+                continue
+            val = float(series.iloc[-1])
+            prices[sym] = val
+        except Exception:
+            continue
+    return prices

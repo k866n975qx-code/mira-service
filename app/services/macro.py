@@ -339,36 +339,67 @@ def _load_existing() -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]
     return snap, hist, trends
 
 
-def get_macro_package(force_refresh: bool = False) -> Dict[str, Any]:
+def get_macro_package(force_refresh: bool = False, as_of: Optional[date] = None) -> Dict[str, Any]:
     """
     Return a macro package: snapshot + history + trends.
     Tries to use cached files; recomputes if stale or missing.
     """
-    snap, hist, trends = _load_existing()
-    today = date.today().isoformat()
-    fresh = (snap is not None) and snap.get("date") == today and not force_refresh
-    if fresh and hist and trends:
-        return {"snapshot": snap, "history": hist, "trends": trends}
+    if as_of is None:
+        snap, hist, trends = _load_existing()
+        today = date.today().isoformat()
+        fresh = (snap is not None) and snap.get("date") == today and not force_refresh
+        if fresh and hist and trends:
+            return {"snapshot": snap, "history": hist, "trends": trends}
 
-    # To avoid repeated heavy calls, use a TTL disk cache guard
-    guard_key = "macro_guard"
-    guard_ok = load_ttl_cache("macro", guard_key) is None or force_refresh
-    if guard_ok:
+        # To avoid repeated heavy calls, use a TTL disk cache guard
+        guard_key = "macro_guard"
+        guard_ok = load_ttl_cache("macro", guard_key) is None or force_refresh
+        if guard_ok:
+            try:
+                store_ttl_cache("macro", guard_key, {"started_at": datetime.utcnow().isoformat() + "Z"}, 300)
+            except Exception:
+                pass
+            snap = fetch_macro_snapshot()
+            try:
+                _write_json_and_gzip(_snapshot_path(), snap)
+            except Exception:
+                pass
+            hist = update_history(snap)
+            trends = compute_trends(hist)
+        # Re-load to ensure consistent shapes
+        snap2, hist2, trends2 = _load_existing()
+        return {
+            "snapshot": snap2 or snap or {},
+            "history": hist2 or hist or {},
+            "trends": trends2 or trends or {},
+        }
+
+    # Historical as_of: attempt to load time-stamped files, else fall back to closest available (history/trends are rolling).
+    snap_file = os.path.join(DEFAULT_MACRO_DIR, f"macro_snapshot_{as_of.isoformat()}.json")
+    hist_file = os.path.join(DEFAULT_MACRO_DIR, f"macro_history_{as_of.isoformat()}.json")
+    trends_file = os.path.join(DEFAULT_MACRO_DIR, f"macro_trends_{as_of.isoformat()}.json")
+
+    def _load(path: str) -> Optional[Dict[str, Any]]:
         try:
-            store_ttl_cache("macro", guard_key, {"started_at": datetime.utcnow().isoformat() + "Z"}, 300)
+            if os.path.exists(path):
+                return json.load(open(path))
         except Exception:
-            pass
-        snap = fetch_macro_snapshot()
-        try:
-            _write_json_and_gzip(_snapshot_path(), snap)
-        except Exception:
-            pass
-        hist = update_history(snap)
-        trends = compute_trends(hist)
-    # Re-load to ensure consistent shapes
-    snap2, hist2, trends2 = _load_existing()
-    return {
-        "snapshot": snap2 or snap or {},
-        "history": hist2 or hist or {},
-        "trends": trends2 or trends or {},
-    }
+            return None
+        return None
+
+    snap_h = _load(snap_file)
+    hist_h = _load(hist_file)
+    trends_h = _load(trends_file)
+
+    if snap_h and hist_h and trends_h:
+        return {"snapshot": snap_h, "history": hist_h, "trends": trends_h}
+
+    # Fallback: use current macro (best-effort) if no historical artifact exists.
+    snap, hist, trends = _load_existing()
+    if snap and hist and trends:
+        return {"snapshot": snap, "history": hist, "trends": trends}
+    # Final fallback: compute fresh
+    snap = fetch_macro_snapshot()
+    hist = update_history(snap)
+    trends = compute_trends(hist)
+    return {"snapshot": snap, "history": hist, "trends": trends}

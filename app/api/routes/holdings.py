@@ -28,7 +28,11 @@ from app.services.snapshot_normalizer import (
 from app.api.deps import get_db
 from app.infra.models import DividendEvent, HoldingSnapshot, LMTransaction
 from app.services.holdings import reconstruct_holdings
-from app.services.pricing import get_latest_prices, _price_cache_ttl_seconds
+from app.services.pricing import (
+    get_latest_prices,
+    _price_cache_ttl_seconds,
+    get_prices_as_of,
+)
 from app.services.securities import resolve_symbol_from_cusip, should_overwrite_symbol
 from app.services.enrich import enrich_holding
 from app.services.portfolio import compute_portfolio_rollups
@@ -527,13 +531,56 @@ def get_valued_holdings_for_plaid_account(
         data = _round_numbers(data)
         return data
 
+    def _fill_gaps(new_val: Any, existing_val: Any) -> Any:
+        """Merge where None/empty in new uses existing; otherwise keep new."""
+        if new_val is None:
+            return existing_val
+        if isinstance(new_val, dict) and isinstance(existing_val, dict):
+            merged = {}
+            all_keys = set(new_val.keys()) | set(existing_val.keys())
+            for k in all_keys:
+                merged[k] = _fill_gaps(new_val.get(k), existing_val.get(k))
+            return merged
+        if isinstance(new_val, list) and isinstance(existing_val, list):
+            return new_val if len(new_val) > 0 else existing_val
+        return new_val
+
+    def _validate_snapshot(snap: Dict[str, Any], allow_partial: bool = False) -> None:
+        missing_fields = []
+        def _chk(path: str) -> Any:
+            cur = snap
+            for p in path.split("."):
+                if not isinstance(cur, dict) or p not in cur:
+                    missing_fields.append(path)
+                    return None
+                cur = cur[p]
+            return cur
+
+        mv = _chk("totals.market_value")
+        cb = _chk("totals.cost_basis")
+        inc = _chk("income.projected_monthly_income")
+        vol = _chk("portfolio_rollups.risk.vol_30d_pct")
+        holdings = snap.get("holdings")
+        if not holdings or not isinstance(holdings, list):
+            missing_fields.append("holdings")
+        else:
+            for h in holdings:
+                if not h.get("symbol"):
+                    missing_fields.append("holdings.symbol")
+                    break
+                if not allow_partial and h.get("market_value") is None:
+                    missing_fields.append("holdings.market_value")
+                    break
+        if missing_fields and not allow_partial:
+            raise HTTPException(status_code=500, detail=f"Snapshot validation failed; missing: {sorted(set(missing_fields))}")
+
     def _maybe_slim(snapshot: Dict[str, Any]) -> Dict[str, Any]:
         return _slim_snapshot(snapshot) if slim else snapshot
 
     def _attach_macro_block(payload: Dict[str, Any], refresh_flag: bool = False) -> None:
-        """Best-effort macro attachment; non-blocking."""
+        """Best-effort macro attachment; non-blocking; uses as-of date when possible."""
         try:
-            macro = get_macro_package(force_refresh=bool(refresh_flag))
+            macro = get_macro_package(force_refresh=bool(refresh_flag), as_of=as_of)
             snap = macro.get("snapshot") if isinstance(macro, dict) else None
             if isinstance(snap, dict) and snap.get("date"):
                 prov = None
@@ -584,23 +631,42 @@ def get_valued_holdings_for_plaid_account(
             if not existed_daily:
                 try:
                     wfg = importlib.import_module("scripts.weekly_fusion_generator")
-                    # Determine if a new weekly summary is needed: require at least 7 daily files and no existing weekly for latest end date.
-                    daily_files = [
-                        f for f in os.listdir(daily_dir) if f.endswith(".json")
-                    ]
-                    dates = []
+                    daily_files = [f for f in os.listdir(daily_dir) if f.endswith(".json")]
+                    dates: list[date] = []
                     for fname in daily_files:
                         try:
                             dates.append(date.fromisoformat(fname.replace(".json", "")))
                         except Exception:
                             continue
-                    if len(dates) >= 7:
-                        week_end = sorted(dates)[-1]
-                        weekly_fname = f"weekly_{week_end.strftime('%Y_%m_%d')}.json"
-                        weekly_path = os.path.abspath(
-                            os.path.join(os.path.dirname(daily_dir), "..", "summaries", "weekly", weekly_fname)
+                    dates = sorted(set(dates))
+
+                    # Determine last summarized weekly end_date, if any.
+                    weekly_dir = os.path.abspath(os.path.join(os.path.dirname(daily_dir), "..", "summaries", "weekly"))
+                    last_weekly_end: Optional[date] = None
+                    if os.path.isdir(weekly_dir):
+                        for wfile in os.listdir(weekly_dir):
+                            if not wfile.endswith(".json"):
+                                continue
+                            base = wfile.replace(".json", "")
+                            if base.startswith("weekly_"):
+                                try:
+                                    end_d = date.fromisoformat(base.replace("weekly_", "").replace("_", "-"))
+                                    if last_weekly_end is None or end_d > last_weekly_end:
+                                        last_weekly_end = end_d
+                                except Exception:
+                                    continue
+
+                    # Require 7 unsummarized consecutive days beyond the last weekly end before generating a new weekly.
+                    new_days = [d for d in dates if (last_weekly_end is None or d > last_weekly_end)]
+                    if len(new_days) >= 7:
+                        candidate_block = sorted(new_days)[-7:]
+                        is_consecutive = all(
+                            (candidate_block[i] - candidate_block[i - 1]).days == 1 for i in range(1, len(candidate_block))
                         )
-                        if not os.path.exists(weekly_path):
+                        candidate_end = candidate_block[-1]
+                        weekly_fname = f"weekly_{candidate_end.strftime('%Y_%m_%d')}.json"
+                        weekly_path = os.path.join(weekly_dir, weekly_fname)
+                        if is_consecutive and not os.path.exists(weekly_path):
                             wfg.generate_and_write(use_cache=False)
                 except Exception:
                     pass
@@ -896,8 +962,24 @@ def get_valued_holdings_for_plaid_account(
     # unique list of symbols for pricing/history
     symbols_list = sorted({h["symbol"] for h in holdings if h.get("symbol")})
 
-    # fetch latest prices
-    price_map = get_latest_prices(symbols_list, bypass_cache=refresh)
+    # fetch prices (historical if as_of in the past) with retry safeguards
+    today = date.today()
+    price_attempts = 0
+    price_map: Dict[str, float] = {}
+    while price_attempts < 3:
+        if as_of < today:
+            price_map = get_prices_as_of(symbols_list, as_of_date=as_of)
+        else:
+            price_map = get_latest_prices(symbols_list, bypass_cache=refresh)
+        if symbols_list and not price_map:
+            price_attempts += 1
+            time.sleep(2)
+            continue
+        break
+    price_partial = False
+    if symbols_list:
+        missing_syms = set(symbols_list) - set(price_map.keys())
+        price_partial = len(missing_syms) > 0
 
     total_value = 0.0
     missing: list[str] = []
@@ -1287,6 +1369,8 @@ def get_valued_holdings_for_plaid_account(
     _inject_goal_progress(result, as_of)
     _inject_margin_guidance(result, as_of)
 
+    # Attach macro only for today; avoid leaking current macro into historical snapshots.
+    if as_of == today:
     _attach_macro_block(result, refresh_flag=bool(refresh))
 
     for h in result.get("holdings", []):
@@ -1296,6 +1380,24 @@ def get_valued_holdings_for_plaid_account(
     final_snapshot = build_and_cache_snapshot(
         result, key=cache_key, ttl=SNAPSHOT_CACHE_TTL_SECONDS
     )
+
+    # Merge gaps with existing snapshot for this date (only fill missing/None; keep new values otherwise).
+    try:
+        existing_for_merge = (
+            db.query(HoldingSnapshot)
+            .filter(
+                HoldingSnapshot.plaid_account_id == plaid_account_id,
+                HoldingSnapshot.as_of_date == as_of,
+            )
+            .one_or_none()
+        )
+        if existing_for_merge and existing_for_merge.snapshot:
+            final_snapshot = _fill_gaps(final_snapshot, dict(existing_for_merge.snapshot))
+    except Exception:
+        pass
+
+    # Validate required fields before persisting/serving
+    _validate_snapshot(final_snapshot, allow_partial=price_partial)
     try:
         _persist_snapshot_file(final_snapshot, as_of, plaid_account_id)
     except Exception:
