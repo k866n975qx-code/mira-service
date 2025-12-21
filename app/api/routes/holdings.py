@@ -1364,6 +1364,7 @@ def get_valued_holdings_for_plaid_account(
 
     snapshot_created_at = datetime.now(timezone.utc)
     result["meta"] = _build_meta("db", snapshot_created_at)
+    result["meta"]["price_partial"] = bool(price_partial)
 
     # Attach goal progress & margin guidance before normalizing/caching
     _inject_goal_progress(result, as_of)
@@ -1393,6 +1394,7 @@ def get_valued_holdings_for_plaid_account(
         )
         if existing_for_merge and existing_for_merge.snapshot:
             final_snapshot = _fill_gaps(final_snapshot, dict(existing_for_merge.snapshot))
+            final_snapshot.setdefault("meta", {}).update({"filled_from_existing": True})
     except Exception:
         pass
 
@@ -1503,7 +1505,18 @@ def refresh_snapshots(payload: RefreshSnapshotsRequest, db: Session = Depends(ge
                     "cache_origin": (meta.get("cache") or {}).get("origin") or meta.get("cache_origin"),
                     "holdings": len(snap.get("holdings") or []),
                     "market_value": totals.get("market_value"),
-                    "status": "ok",
+                    "status": "partial" if meta.get("price_partial") else "ok",
+                    "filled_from_existing": bool(meta.get("filled_from_existing")),
+                    "price_partial": bool(meta.get("price_partial")),
+                }
+            )
+        except HTTPException as he:
+            results.append(
+                {
+                    "plaid_account_id": pid,
+                    "elapsed_sec": round(time.perf_counter() - item_start, 3),
+                    "error": str(he.detail),
+                    "status": "timeout" if he.status_code == 503 else "error",
                 }
             )
         except Exception as e:
