@@ -5,6 +5,7 @@ import json
 import os
 import gzip
 import time
+import importlib
 from datetime import date, datetime, timedelta, timezone
 from math import ceil, log
 from typing import Any, Dict, Optional, List
@@ -571,6 +572,13 @@ def get_valued_holdings_for_plaid_account(
             gz_path = f"{path}.gz"
             with gzip.open(gz_path, "wt", encoding="utf-8") as gz:
                 json.dump(payload, gz, separators=(",", ":"))
+
+            # Also mirror to data/snapshots/daily for weekly generator inputs.
+            daily_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "snapshots", "daily"))
+            os.makedirs(daily_dir, exist_ok=True)
+            daily_path = os.path.join(daily_dir, f"{as_of_date.isoformat()}.json")
+            with open(daily_path, "w") as fh:
+                json.dump(payload, fh, separators=(",", ":"))
         except Exception:
             pass
 
@@ -1265,6 +1273,14 @@ def get_valued_holdings_for_plaid_account(
     )
     try:
         _persist_snapshot_file(final_snapshot, as_of, plaid_account_id)
+    except Exception:
+        pass
+
+    # Attempt to generate/update weekly summary when a new daily snapshot is created.
+    try:
+        wfg = importlib.import_module("scripts.weekly_fusion_generator")
+        # use cache when possible; generator will build if stale/missing
+        wfg.generate_and_write(use_cache=True)
     except Exception:
         pass
 

@@ -13,3 +13,7 @@ macro_preview.json
 docs/macro/
 docs/portfolio/snapshots/
 docs/portfolio/comparisons/
+# Weekly fusion artifacts and caches
+data/snapshots/daily/
+data/summaries/weekly/
+cache/weekly/

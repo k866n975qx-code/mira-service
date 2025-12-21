@@ -4,6 +4,7 @@ import gzip
 import os
 import json
 import hashlib
+from datetime import date
 from typing import Any, Dict, Optional, List
 
 from fastapi import APIRouter, HTTPException, Query
@@ -16,6 +17,9 @@ SNAPSHOT_DIR = os.getenv(
     "MIRA_PORTFOLIO_SNAPSHOT_DIR",
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "docs", "portfolio", "snapshots")),
 )
+# Mirror daily snapshots used by weekly generator
+DAILY_SNAPSHOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "snapshots", "daily"))
+WEEKLY_SUMMARY_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "summaries", "weekly"))
 
 
 def _snapshot_path(plaid_account_id: int, as_of: str) -> Optional[str]:
@@ -89,6 +93,61 @@ def _slim_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     return _round_numbers(data)
 
 
+def _list_daily_snapshots() -> List[Dict[str, Any]]:
+    # prefer mirrored daily dir, fallback to SNAPSHOT_DIR
+    daily_dir = DAILY_SNAPSHOT_DIR if os.path.isdir(DAILY_SNAPSHOT_DIR) else SNAPSHOT_DIR
+    out: List[Dict[str, Any]] = []
+    if not os.path.isdir(daily_dir):
+        return out
+    for fname in os.listdir(daily_dir):
+        if not fname.endswith(".json"):
+            continue
+        fpath = os.path.join(daily_dir, fname)
+        try:
+            base = fname.replace(".json", "")
+            snap_date = date.fromisoformat(base)
+            out.append({"date": snap_date.isoformat(), "file": fname})
+        except Exception:
+            continue
+    out.sort(key=lambda x: x["date"])
+    return out
+
+
+def _list_weekly_summaries() -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    if not os.path.isdir(WEEKLY_SUMMARY_DIR):
+        return out
+    for fname in os.listdir(WEEKLY_SUMMARY_DIR):
+        if not fname.endswith(".json"):
+            continue
+        fpath = os.path.join(WEEKLY_SUMMARY_DIR, fname)
+        try:
+            with open(fpath, "r") as fh:
+                data = json.load(fh)
+            period = data.get("period") or {}
+            out.append(
+                {
+                    "file": fname,
+                    "start_date": period.get("start_date"),
+                    "end_date": period.get("end_date"),
+                    "days_included": period.get("days_included"),
+                    "summary_id": data.get("summary_id"),
+                }
+            )
+        except Exception:
+            continue
+    out.sort(key=lambda x: (x.get("end_date") or ""))
+    return out
+
+
+def _load_weekly_summary_by_file(filename: str) -> Dict[str, Any]:
+    path = os.path.join(WEEKLY_SUMMARY_DIR, filename)
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"weekly summary not found: {filename}")
+    with open(path, "r") as fh:
+        return json.load(fh)
+
+
 @router.get("/snapshot/{as_of}")
 def get_stored_snapshot(
     as_of: str,
@@ -107,6 +166,59 @@ def get_stored_snapshot(
     if slim:
         snap = _slim_snapshot(snap)
     return snap
+
+
+@router.get("/weekly_summary")
+def get_weekly_summary(
+    summary_file: Optional[str] = Query(None, description="Optional weekly summary filename to return."),
+    generate: bool = Query(False, description="If true, run generator; otherwise return existing summary."),
+    force: bool = Query(False, description="When generate=true, bypass cache.")
+) -> Dict[str, Any]:
+    """
+    Return an existing weekly summary (default: latest). Generation is opt-in via generate=true.
+    """
+    if generate:
+        try:
+            from scripts import weekly_fusion_generator as wfg  # local import to avoid startup dependency if unused
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Unable to import generator: {e}")
+        try:
+            summary, out_path = wfg.generate_and_write(use_cache=not force)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"file": os.path.basename(out_path), "summary": summary}
+
+    items = _list_weekly_summaries()
+    if not items:
+        raise HTTPException(status_code=404, detail="No weekly summaries available.")
+    target_file = summary_file
+    if not target_file:
+        # pick latest by end_date
+        items_sorted = sorted(items, key=lambda x: x.get("end_date") or "")
+        target_file = items_sorted[-1]["file"]
+    try:
+        summary = _load_weekly_summary_by_file(target_file)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Weekly summary not found.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"file": target_file, "summary": summary}
+
+
+@router.get("/snapshots")
+def list_daily_snapshots() -> Dict[str, Any]:
+    """
+    List available daily snapshots (date and filename).
+    """
+    return {"count": len(_list_daily_snapshots()), "items": _list_daily_snapshots()}
+
+
+@router.get("/weekly_summaries")
+def list_weekly_summaries() -> Dict[str, Any]:
+    """
+    List available weekly summaries with coverage dates.
+    """
+    return {"count": len(_list_weekly_summaries()), "items": _list_weekly_summaries()}
 
 
 class CompareRequest(BaseModel):
@@ -137,9 +249,21 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
     """
     Compare two stored snapshots by date for a plaid_account_id.
     """
+    # Normalize order so snapshot_a is always the newer date and snapshot_b the older date.
+    a_str = payload.snapshot_a_date
+    b_str = payload.snapshot_b_date
     try:
-        snap_a = _load_snapshot(payload.plaid_account_id, payload.snapshot_a_date)
-        snap_b = _load_snapshot(payload.plaid_account_id, payload.snapshot_b_date)
+        a_dt = date.fromisoformat(a_str)
+        b_dt = date.fromisoformat(b_str)
+        if a_dt < b_dt:
+            a_str, b_str = b_str, a_str
+    except Exception:
+        # If parsing fails, continue with provided order.
+        a_str, b_str = payload.snapshot_a_date, payload.snapshot_b_date
+
+    try:
+        snap_a = _load_snapshot(payload.plaid_account_id, a_str)
+        snap_b = _load_snapshot(payload.plaid_account_id, b_str)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="One or both snapshots not found")
     except Exception as e:
@@ -321,8 +445,8 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
 
     response: Dict[str, Any] = {
         "meta": {
-            "snapshot_a_date": payload.snapshot_a_date,
-            "snapshot_b_date": payload.snapshot_b_date,
+            "snapshot_a_date": a_str,
+            "snapshot_b_date": b_str,
             "account_id": payload.plaid_account_id,
             "compression": "none",
             "compare_all": payload.compare_all,
@@ -353,7 +477,7 @@ def compare_snapshots(payload: CompareRequest) -> Dict[str, Any]:
     try:
         compare_dir = os.path.join(SNAPSHOT_DIR, "..", "comparisons")
         os.makedirs(compare_dir, exist_ok=True)
-        fname = f"compare-{payload.plaid_account_id}-{payload.snapshot_a_date}-{payload.snapshot_b_date}.json"
+        fname = f"compare-{payload.plaid_account_id}-{a_str}-{b_str}.json"
         _write_json_and_gzip(os.path.join(compare_dir, fname), response)
     except Exception:
         pass
