@@ -980,6 +980,8 @@ def get_valued_holdings_for_plaid_account(
     if symbols_list:
         missing_syms = set(symbols_list) - set(price_map.keys())
         price_partial = len(missing_syms) > 0
+        if not price_map:
+            price_partial = True  # proceed with partial snapshot; fill gaps on next run
 
     total_value = 0.0
     missing: list[str] = []
@@ -1364,7 +1366,14 @@ def get_valued_holdings_for_plaid_account(
 
     snapshot_created_at = datetime.now(timezone.utc)
     result["meta"] = _build_meta("db", snapshot_created_at)
-    result["meta"]["price_partial"] = bool(price_partial)
+    # recompute partial flag after building holdings
+    def _has_missing_prices(snap: Dict[str, Any]) -> bool:
+        for h in snap.get("holdings") or []:
+            if h.get("market_value") is None:
+                return True
+        return False
+
+    result["meta"]["price_partial"] = bool(price_partial or _has_missing_prices(result))
 
     # Attach goal progress & margin guidance before normalizing/caching
     _inject_goal_progress(result, as_of)
@@ -1395,6 +1404,9 @@ def get_valued_holdings_for_plaid_account(
         if existing_for_merge and existing_for_merge.snapshot:
             final_snapshot = _fill_gaps(final_snapshot, dict(existing_for_merge.snapshot))
             final_snapshot.setdefault("meta", {}).update({"filled_from_existing": True})
+            # recompute price_partial after filling gaps
+            if not _has_missing_prices(final_snapshot):
+                final_snapshot.setdefault("meta", {})["price_partial"] = False
     except Exception:
         pass
 
