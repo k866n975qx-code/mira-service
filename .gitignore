@@ -11,9 +11,14 @@ __pycache__/
 output.json
 macro_preview.json
 docs/macro/
-docs/portfolio/snapshots/
-docs/portfolio/comparisons/
+docs/portfolio/snapshots/*
+!docs/portfolio/snapshots/.gitkeep
+docs/portfolio/comparisons/*
+!docs/portfolio/comparisons/.gitkeep
 # Weekly fusion artifacts and caches
-data/snapshots/daily/
-data/summaries/weekly/
-cache/weekly/
+data/snapshots/daily/*
+!data/snapshots/daily/.gitkeep
+data/summaries/weekly/*
+!data/summaries/weekly/.gitkeep
+cache/weekly/*
+!cache/weekly/.gitkeep
