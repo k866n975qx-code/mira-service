@@ -185,6 +185,10 @@ def get_weekly_summary(
             raise HTTPException(status_code=500, detail=f"Unable to import generator: {e}")
         try:
             summary, out_path = wfg.generate_and_write(use_cache=not force)
+            if summary is None or out_path is None:
+                raise HTTPException(status_code=409, detail="Not enough daily snapshots to generate weekly.")
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
         return {"file": os.path.basename(out_path), "summary": summary}

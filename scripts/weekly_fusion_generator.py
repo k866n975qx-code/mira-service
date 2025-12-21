@@ -20,6 +20,7 @@ DAILY_DIR = os.path.abspath(os.path.join(".", "data", "snapshots", "daily"))
 WEEKLY_DIR = os.path.abspath(os.path.join(".", "data", "summaries", "weekly"))
 CACHE_DIR = os.path.abspath(os.path.join(".", "cache", "weekly"))
 CACHE_TTL_SECONDS = 24 * 60 * 60
+MIN_DAYS = 7
 
 SCHEMA = {
     "type": "object",
@@ -181,7 +182,7 @@ def delta_pct(new, old):
     return round(((new - old) / old) * 100.0, 3)
 
 
-def load_daily_snapshots(n: int = 7):
+def load_daily_snapshots(n: int = MIN_DAYS):
     files = sorted(glob.glob(os.path.join(DAILY_DIR, "*.json")))
     if not files:
         return []
@@ -465,9 +466,10 @@ def load_from_cache(week_end_date):
 
 
 def generate_and_write(use_cache: bool = True):
-    snapshots = load_daily_snapshots(n=7)
-    if not snapshots:
-        raise RuntimeError("No daily snapshots found.")
+    snapshots = load_daily_snapshots(n=MIN_DAYS)
+    if len(snapshots) < MIN_DAYS:
+        log(f"[Skip] Only {len(snapshots)} daily snapshots; need {MIN_DAYS} to generate weekly.")
+        return None, None
     week_end = snapshots[-1][0]
     cached, cache_path = load_from_cache(week_end)
     if use_cache and cached:
