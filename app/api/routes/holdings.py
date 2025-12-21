@@ -577,8 +577,33 @@ def get_valued_holdings_for_plaid_account(
             daily_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "snapshots", "daily"))
             os.makedirs(daily_dir, exist_ok=True)
             daily_path = os.path.join(daily_dir, f"{as_of_date.isoformat()}.json")
+            existed_daily = os.path.exists(daily_path)
             with open(daily_path, "w") as fh:
                 json.dump(payload, fh, separators=(",", ":"))
+            # Only trigger weekly generation when a brand-new daily snapshot was created.
+            if not existed_daily:
+                try:
+                    wfg = importlib.import_module("scripts.weekly_fusion_generator")
+                    # Determine if a new weekly summary is needed: require at least 7 daily files and no existing weekly for latest end date.
+                    daily_files = [
+                        f for f in os.listdir(daily_dir) if f.endswith(".json")
+                    ]
+                    dates = []
+                    for fname in daily_files:
+                        try:
+                            dates.append(date.fromisoformat(fname.replace(".json", "")))
+                        except Exception:
+                            continue
+                    if len(dates) >= 7:
+                        week_end = sorted(dates)[-1]
+                        weekly_fname = f"weekly_{week_end.strftime('%Y_%m_%d')}.json"
+                        weekly_path = os.path.abspath(
+                            os.path.join(os.path.dirname(daily_dir), "..", "summaries", "weekly", weekly_fname)
+                        )
+                        if not os.path.exists(weekly_path):
+                            wfg.generate_and_write(use_cache=False)
+                except Exception:
+                    pass
         except Exception:
             pass
 

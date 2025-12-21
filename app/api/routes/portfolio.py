@@ -170,9 +170,10 @@ def get_stored_snapshot(
 
 @router.get("/weekly_summary")
 def get_weekly_summary(
-    summary_file: Optional[str] = Query(None, description="Optional weekly summary filename to return."),
+    summary_file: Optional[str] = Query(None, description="Optional weekly summary filename (with or without .json)."),
+    summary_date: Optional[str] = Query(None, description="Optional summary end-date YYYY-MM-DD."),
     generate: bool = Query(False, description="If true, run generator; otherwise return existing summary."),
-    force: bool = Query(False, description="When generate=true, bypass cache.")
+    force: bool = Query(False, description="When generate=true, bypass cache."),
 ) -> Dict[str, Any]:
     """
     Return an existing weekly summary (default: latest). Generation is opt-in via generate=true.
@@ -191,11 +192,22 @@ def get_weekly_summary(
     items = _list_weekly_summaries()
     if not items:
         raise HTTPException(status_code=404, detail="No weekly summaries available.")
-    target_file = summary_file
-    if not target_file:
-        # pick latest by end_date
+
+    target_file = None
+    if summary_file:
+        base = summary_file
+        if base.endswith(".json"):
+            base = base[:-5]
+        if not base.startswith("weekly_"):
+            base = f"weekly_{base}"
+        target_file = f"{base}.json"
+    elif summary_date:
+        # expect YYYY-MM-DD
+        target_file = f"weekly_{summary_date.replace('-', '_')}.json"
+    else:
         items_sorted = sorted(items, key=lambda x: x.get("end_date") or "")
         target_file = items_sorted[-1]["file"]
+
     try:
         summary = _load_weekly_summary_by_file(target_file)
     except FileNotFoundError:
