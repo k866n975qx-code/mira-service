@@ -1371,7 +1371,7 @@ def get_valued_holdings_for_plaid_account(
 
     # Attach macro only for today; avoid leaking current macro into historical snapshots.
     if as_of == today:
-    _attach_macro_block(result, refresh_flag=bool(refresh))
+        _attach_macro_block(result, refresh_flag=bool(refresh))
 
     for h in result.get("holdings", []):
         h.pop("trend", None)
